@@ -42,7 +42,13 @@
 
 typedef struct VifStateCuda {
     VifBufferCuda buf;
-    CUevent event, finished;
+    CUevent event, finished, compute_done;
+    // One per double-buffer slot.  extract() waits on the slot it is about to
+    // reuse (frame index-2, effectively always done) instead of stalling the
+    // host on the whole previous frame, which is what pinned this extractor to
+    // one frame at a time.  Same pattern as ciede_cuda.
+    CUevent slot_done[2];
+    bool compute_done_valid;
     CUstream str, host_stream;
     bool debug;
     double vif_enhn_gain_limit;
@@ -65,6 +71,7 @@ typedef struct VifStateCuda {
 typedef struct write_score_parameters_vif {
     VmafFeatureCollector *feature_collector;
     VifStateCuda *s;
+    void *accum;            // this slot's pinned readback, not s->buf.accum_host
     unsigned index;
 } write_score_parameters_vif;
 
@@ -102,6 +109,10 @@ static int init_fex_cuda(VmafFeatureExtractor *fex, enum VmafPixelFormat pix_fmt
     CHECK_CUDA(cu_f, cuStreamCreateWithPriority(&s->host_stream, CU_STREAM_NON_BLOCKING, 0));
     CHECK_CUDA(cu_f, cuEventCreate(&s->event, CU_EVENT_DEFAULT));
     CHECK_CUDA(cu_f, cuEventCreate(&s->finished, CU_EVENT_DEFAULT));
+    CHECK_CUDA(cu_f, cuEventCreate(&s->compute_done, CU_EVENT_DEFAULT));
+    CHECK_CUDA(cu_f, cuEventCreate(&s->slot_done[0], CU_EVENT_DEFAULT));
+    CHECK_CUDA(cu_f, cuEventCreate(&s->slot_done[1], CU_EVENT_DEFAULT));
+    s->compute_done_valid = false;
     // make this static
     CUmodule filter1d_module;
     CHECK_CUDA(cu_f, cuModuleLoadData(&filter1d_module, filter1d_ptx));
@@ -146,10 +157,11 @@ static int init_fex_cuda(VmafFeatureExtractor *fex, enum VmafPixelFormat pix_fmt
     int ret = vmaf_cuda_buffer_alloc(fex->cu_state, &s->buf.data, data_sz);
     if (ret) goto free_ref;
 
-    ret = vmaf_cuda_buffer_alloc(fex->cu_state, &s->buf.accum_data, sizeof(vif_accums) * 4);
+    // 2x: one set of accumulators per in-flight slot
+    ret = vmaf_cuda_buffer_alloc(fex->cu_state, &s->buf.accum_data, sizeof(vif_accums) * 4 * 2);
     if (ret) goto free_ref;
 
-    ret = vmaf_cuda_buffer_host_alloc(fex->cu_state, (void**)&s->buf.accum_host, sizeof(vif_accums) * 4);
+    ret = vmaf_cuda_buffer_host_alloc(fex->cu_state, (void**)&s->buf.accum_host, sizeof(vif_accums) * 4 * 2);
     if (ret) goto free_ref;
 
     CUdeviceptr data;
@@ -180,9 +192,9 @@ static int init_fex_cuda(VmafFeatureExtractor *fex, enum VmafPixelFormat pix_fmt
 
     s->buf.accum = (int64_t*)data_accum;
 
-    s->buf.cpu_param_buf = malloc(sizeof(write_score_parameters_vif));
+    s->buf.cpu_param_buf = malloc(sizeof(write_score_parameters_vif) * 2);
     write_score_parameters_vif *data_p = s->buf.cpu_param_buf;
-    data_p->s = s;
+    data_p[0].s = data_p[1].s = s;
 
     s->feature_name_dict =
         vmaf_feature_name_dict_from_provided_features(fex->provided_features,
@@ -351,7 +363,7 @@ static int write_scores(write_score_parameters_vif* data)
     unsigned index = data->index;
 
     VifScore vif;
-    vif_accums *accum = (vif_accums*)data->s->buf.accum_host;
+    vif_accums *accum = (vif_accums*)data->accum;
     for (unsigned scale = 0; scale < 4; ++scale) {
         vif.scale[scale].num =
             accum[scale].num_log / 2048.0 + accum[scale].x2 +
@@ -450,9 +462,15 @@ static int extract_fex_cuda(VmafFeatureExtractor *fex,
     int w = ref_pic->w[0];
     int h = dist_pic->h[0];
 
-    // this is done to ensure that the CPU does not overwrite the buffer params for 'write_scores
-    // before the GPU has finished writing to it.
-    CHECK_CUDA(cu_f, cuStreamSynchronize(s->str));
+    // Wait only for the slot about to be reused -- frame index-2, which has
+    // effectively always finished -- rather than cuStreamSynchronize(s->str),
+    // which blocked the host on the entire previous frame and made pipelining
+    // impossible.  The accumulators, pinned readback and callback parameters
+    // are per-slot.  The much larger filtering scratch remains shared, so the
+    // picture stream waits below for the preceding frame's filtering to finish
+    // before it starts scale 0.
+    const unsigned slot = index & 1;
+    CHECK_CUDA(cu_f, cuEventSynchronize(s->slot_done[slot]));
     CHECK_CUDA(cu_f, cuCtxPushCurrent(fex->cu_state->ctx));
     CHECK_CUDA(cu_f, cuCtxPopCurrent(NULL));
     // Zero all four scales' accumulators on the picture stream, not s->str.
@@ -464,8 +482,19 @@ static int extract_fex_cuda(VmafFeatureExtractor *fex,
     // score serialises as null.  Scales 1-3 stay correctly ordered: s->str
     // waits on s->event (recorded on the picture stream after scale 0), so
     // their accumulation is still sequenced after this memset.
-    CHECK_CUDA(cu_f, cuMemsetD8Async(s->buf.accum_data->data, 0, sizeof(vif_accums) * 4,
+    const size_t accum_sz = sizeof(vif_accums) * 4;
+    CUdeviceptr accum_dev = (CUdeviceptr)s->buf.accum_data->data + slot * accum_sz;
+    // The kernels accumulate through s->buf.accum, which init pinned to the
+    // base of the allocation.  It has to follow the slot too, or the kernels
+    // write slot 0 while the memset and readback address slot 1 -- which reads
+    // back zeros and nulls exactly half the frames.
+    s->buf.accum = (int64_t*)accum_dev;
+    CHECK_CUDA(cu_f, cuMemsetD8Async(accum_dev, 0, accum_sz,
                 vmaf_cuda_picture_get_stream(ref_pic)));
+    if (s->compute_done_valid)
+        CHECK_CUDA(cu_f, cuStreamWaitEvent(
+                    vmaf_cuda_picture_get_stream(ref_pic), s->compute_done,
+                    CU_EVENT_WAIT_DEFAULT));
     CHECK_CUDA(cu_f, cuStreamWaitEvent(vmaf_cuda_picture_get_stream(ref_pic), vmaf_cuda_picture_get_ready_event(dist_pic), CU_EVENT_WAIT_DEFAULT));
     for (unsigned scale = 0; scale < 4; ++scale) {
         if (scale > 0) {
@@ -488,21 +517,28 @@ static int extract_fex_cuda(VmafFeatureExtractor *fex,
             CHECK_CUDA(cu_f, cuCtxPopCurrent(NULL));
         }
     }
+    CHECK_CUDA(cu_f, cuEventRecord(s->compute_done, s->str));
+    s->compute_done_valid = true;
 
     // log has to be divided by 2048 as log_value = log2(i*2048)  i=16384 to 65535
     // num[0] = accum_num_log / 2048.0 + (accum_den_non_log - (accum_num_non_log /
     // 65536.0) / (255.0*255.0)); den[0] = accum_den_log / 2048.0 +
-    vif_accums *accum = (vif_accums*)s->buf.accum_host;
-    CHECK_CUDA(cu_f, cuStreamSynchronize(s->host_stream));
-    CHECK_CUDA(cu_f, cuMemcpyDtoHAsync(accum, s->buf.accum_data->data,
-                sizeof(vif_accums) * 4, s->str));
+    vif_accums *accum = (vif_accums*)((char*)s->buf.accum_host + slot * accum_sz);
+    CHECK_CUDA(cu_f, cuMemcpyDtoHAsync(accum, accum_dev, accum_sz, s->str));
     CHECK_CUDA(cu_f, cuEventRecord(s->finished, s->str));
     CHECK_CUDA(cu_f, cuStreamWaitEvent(s->host_stream, s->finished, CU_EVENT_WAIT_DEFAULT));
 
-    write_score_parameters_vif *data = s->buf.cpu_param_buf;
+    // The callback runs on host_stream, which the event plumbing above already
+    // orders after the readback.  It was previously launched on s->str, which
+    // put a host callback in the middle of the compute stream and serialised
+    // the next frame behind it.
+    write_score_parameters_vif *data =
+        &((write_score_parameters_vif*)s->buf.cpu_param_buf)[slot];
     data->feature_collector = feature_collector;
+    data->accum = accum;
     data->index = index;
-    CHECK_CUDA(cu_f, cuLaunchHostFunc(s->str, (CUhostFn*)write_scores, data));
+    CHECK_CUDA(cu_f, cuLaunchHostFunc(s->host_stream, (CUhostFn*)write_scores, data));
+    CHECK_CUDA(cu_f, cuEventRecord(s->slot_done[slot], s->host_stream));
     return 0;
 }
 
@@ -510,8 +546,12 @@ static int close_fex_cuda(VmafFeatureExtractor *fex)
 {
     VifStateCuda *s = fex->priv;
     CHECK_CUDA(fex->cu_state->f, cuStreamSynchronize(s->str));
+    CHECK_CUDA(fex->cu_state->f, cuStreamSynchronize(s->host_stream));
     CHECK_CUDA(fex->cu_state->f, cuEventDestroy(s->event));
     CHECK_CUDA(fex->cu_state->f, cuEventDestroy(s->finished));
+    CHECK_CUDA(fex->cu_state->f, cuEventDestroy(s->compute_done));
+    CHECK_CUDA(fex->cu_state->f, cuEventDestroy(s->slot_done[0]));
+    CHECK_CUDA(fex->cu_state->f, cuEventDestroy(s->slot_done[1]));
 
     int ret = 0;
     if (s->buf.data) {
@@ -539,6 +579,7 @@ static int flush_fex_cuda(VmafFeatureExtractor *fex,
     VifStateCuda *s = fex->priv;
 
     CHECK_CUDA(fex->cu_state->f, cuStreamSynchronize(s->str));
+    CHECK_CUDA(fex->cu_state->f, cuStreamSynchronize(s->host_stream));
     return 1;
 }
 
