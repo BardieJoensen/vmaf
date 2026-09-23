@@ -204,6 +204,13 @@ test_cuda_motion_flush = executable('test_cuda_motion_flush',
     dependencies : [cuda_dependency, math_lib],
 )
 test('test_cuda_motion_flush', test_cuda_motion_flush)
+test_cuda_psnr_parity = executable('test_cuda_psnr_parity',
+    ['test.c', 'test_cuda_psnr_parity.c'],
+    include_directories : [libvmaf_inc, test_inc],
+    link_with : get_option('default_library') == 'both' ? libvmaf.get_static_lib() : libvmaf,
+    dependencies : cuda_dependency,
+)
+test('test_cuda_psnr_parity', test_cuda_psnr_parity)
 endif
 
 test_pic_preallocation = executable('test_pic_preallocation',
