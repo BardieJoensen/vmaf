@@ -25,8 +25,8 @@ static char *run_motion(unsigned threads, unsigned bpc, unsigned frames,
     };
     int err = vmaf_init(&vmaf, cfg);
     mu_assert("vmaf_init failed", !err);
+    VmafCudaState *state = NULL;
     if (cuda) {
-        VmafCudaState *state;
         err = vmaf_cuda_state_init(&state, (VmafCudaConfiguration){ 0 });
         if (err) {
             vmaf_close(vmaf);
@@ -70,6 +70,7 @@ static char *run_motion(unsigned threads, unsigned bpc, unsigned frames,
         fprintf(stderr, "threads=%u bpc=%u frames=%u cuda=%d mixed=%d flush=%d\n",
                 threads, bpc, frames, cuda, mixed, err);
         vmaf_close(vmaf);
+        free(state);
         return "motion flush failed (possible duplicate final score)";
     }
     for (unsigned i = 0; i < frames; i++) {
@@ -87,6 +88,7 @@ static char *run_motion(unsigned threads, unsigned bpc, unsigned frames,
         }
     }
     err = vmaf_close(vmaf);
+    free(state);
     mu_assert("vmaf_close failed", !err);
     return NULL;
 }
