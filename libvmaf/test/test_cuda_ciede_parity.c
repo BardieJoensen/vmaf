@@ -16,22 +16,9 @@
  *
  */
 
-/*
- * CPU vs CUDA parity test for the ciede_cuda feature extractor. Unlike the
- * psnr_cuda/ssim_cuda parity test this asserts a small tolerance rather than
- * bit-exactness: ciede is dominated by libm transcendentals, which differ
- * between glibc and CUDA in the low bits, and the device math runs in
- * float32, whereas the CPU color conversion uses double precision. This
- * tolerance applies to these noisy-frame fixtures, not all possible inputs.
- *
- * Uses YUV420P and YUV422P input so both axes of the fused nearest-neighbor
- * chroma upsampling are exercised independently against the CPU's
- * scale_chroma_planes. Also checks the identical-frame case, where both
- * implementations must return +inf.
- *
- * Exits with meson's SKIP code (77) when no CUDA device is available so CI
- * without a GPU reports the test as skipped.
- */
+/* Compare CPU/CUDA CIEDE on noisy and identical frames.
+ * Float color conversion requires a fixture-specific tolerance.
+ * A missing CUDA device is reported as a Meson SKIP (77). */
 
 #include <math.h>
 #include <stdio.h>
@@ -55,8 +42,7 @@ static uint32_t lcg_next(void)
     return lcg_state >> 16;
 }
 
-// frame N_FRAMES-1 is generated identical (ref == dist) to exercise the
-// de00_sum == 0 -> +inf path
+/* The last frame is identical, so its score must be positive infinity. */
 static void fill_pictures(VmafPicture *ref, VmafPicture *dist, unsigned bpc,
                           unsigned index)
 {
@@ -84,7 +70,7 @@ static void fill_pictures(VmafPicture *ref, VmafPicture *dist, unsigned bpc,
     }
 }
 
-// returns 0 on success, 1 when CUDA is unavailable (caller should skip)
+/* Return 1 when CUDA is unavailable; report test failures through fail. */
 static int run_pass(int use_cuda, enum VmafPixelFormat pix_fmt, unsigned bpc,
                     unsigned w, unsigned h, double scores[N_FRAMES], char **fail)
 {
@@ -99,12 +85,13 @@ static int run_pass(int use_cuda, enum VmafPixelFormat pix_fmt, unsigned bpc,
     err = vmaf_init(&vmaf, cfg);
     if (err) { *fail = "problem during vmaf_init"; return 0; }
 
+    VmafCudaState *cu_state = NULL;
     if (use_cuda) {
-        VmafCudaState *cu_state;
         VmafCudaConfiguration cuda_cfg = { 0 };
         err = vmaf_cuda_state_init(&cu_state, cuda_cfg);
         if (err) {
             vmaf_close(vmaf);
+            free(cu_state);
             return 1; // no CUDA device, skip
         }
         err = vmaf_cuda_import_state(vmaf, cu_state);
@@ -133,6 +120,7 @@ static int run_pass(int use_cuda, enum VmafPixelFormat pix_fmt, unsigned bpc,
     }
 
     err = vmaf_close(vmaf);
+    free(cu_state);
     if (err) { *fail = "problem during vmaf_close"; return 0; }
 
     return 0;

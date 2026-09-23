@@ -84,7 +84,8 @@ static CUresult CUDAAPI host_alloc(void **ptr, size_t size, unsigned flags)
 static CUresult CUDAAPI host_free(void *ptr)
 { return destroy_handle((uintptr_t)ptr); }
 
-static char *lifecycle(const char *name, unsigned width, unsigned height, int valid)
+static char *lifecycle(const char *name, enum VmafPixelFormat format,
+                       unsigned width, unsigned height, int valid)
 {
     CudaFunctions functions = {
         .cuCtxPushCurrent = push, .cuCtxPopCurrent = pop,
@@ -106,7 +107,7 @@ static char *lifecycle(const char *name, unsigned width, unsigned height, int va
         int err = vmaf_feature_extractor_context_create(&ctx, fex, NULL);
         mu_assert("extractor context create failed", !err);
         ctx->fex->cu_state = &state;
-        err = vmaf_feature_extractor_context_init(ctx, VMAF_PIX_FMT_YUV420P,
+        err = vmaf_feature_extractor_context_init(ctx, format,
                                                  8, width, height);
         if (fail_at || !valid) {
             mu_assert("invalid or failed initialization was accepted", err < 0);
@@ -129,13 +130,32 @@ static char *test_lifecycle(void)
 {
     const char *names[] = { "psnr_cuda", "ssim_cuda", "ciede_cuda" };
     for (unsigned i = 0; i < 3; i++) {
-        char *fail = lifecycle(names[i], 64, 48, 1);
+        char *fail = lifecycle(names[i], VMAF_PIX_FMT_YUV420P, 64, 48, 1);
         if (fail) return fail;
     }
     /* Exercise both SSIM allocation layouts and its invalid-window path. */
-    char *fail = lifecycle("ssim_cuda", 768, 432, 1);
+    char *fail = lifecycle("ssim_cuda", VMAF_PIX_FMT_YUV420P, 768, 432, 1);
     if (fail) return fail;
-    return lifecycle("ssim_cuda", 8, 8, 0);
+    fail = lifecycle("ssim_cuda", VMAF_PIX_FMT_YUV420P, 8, 8, 0);
+    if (fail) return fail;
+    const struct {
+        enum VmafPixelFormat format;
+        unsigned width, height;
+        int valid;
+    } cases[] = {
+        { VMAF_PIX_FMT_YUV420P, 64, 49, 0 },
+        { VMAF_PIX_FMT_YUV420P, 65, 48, 0 },
+        { VMAF_PIX_FMT_YUV422P, 65, 48, 0 },
+        { VMAF_PIX_FMT_YUV422P, 64, 49, 1 },
+        { VMAF_PIX_FMT_YUV444P, 65, 49, 1 },
+        { VMAF_PIX_FMT_YUV400P, 64, 48, 0 },
+    };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        fail = lifecycle("ciede_cuda", cases[i].format,
+                          cases[i].width, cases[i].height, cases[i].valid);
+        if (fail) return fail;
+    }
+    return NULL;
 }
 
 char *run_tests(void)

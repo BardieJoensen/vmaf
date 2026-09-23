@@ -211,8 +211,7 @@ static int extract_fex_cuda(VmafFeatureExtractor *fex, VmafPicture *ref_pic,
 
     const unsigned n = s->enable_chroma ? 3 : 1;
 
-    // kernels run on the extractor's own stream so they overlap with other
-    // extractors' work on the picture streams; wait for both uploads first
+    /* Wait for both producers before reading either picture. */
     CUDA_FEX_CHECK(cu_f, cuStreamWaitEvent(s->cuda.str,
                 vmaf_cuda_picture_get_ready_event(ref_pic),
                 CU_EVENT_WAIT_DEFAULT));
@@ -242,9 +241,7 @@ static int extract_fex_cuda(VmafFeatureExtractor *fex, VmafPicture *ref_pic,
                     s->cuda.str, kernel_params, NULL));
     }
 
-    // lifetime handshake: the pool recycles a picture once the `finished`
-    // event its own stream records (after the fex loop) has completed, so
-    // make both picture streams wait for our reads
+    /* Keep pooled pictures alive until the kernels finish reading them. */
     CUDA_FEX_CHECK(cu_f, cuEventRecord(s->cuda.consumed, s->cuda.str));
     CUDA_FEX_CHECK(cu_f, cuStreamWaitEvent(vmaf_cuda_picture_get_stream(ref_pic),
                 s->cuda.consumed, CU_EVENT_WAIT_DEFAULT));

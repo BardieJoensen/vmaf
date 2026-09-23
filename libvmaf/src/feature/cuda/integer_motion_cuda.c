@@ -332,6 +332,7 @@ static int close_fex_cuda(VmafFeatureExtractor *fex)
     MotionStateCuda *s = fex->priv;
     CudaFunctions *cu_f = fex->cu_state->f;
     CHECK_CUDA(cu_f, cuStreamSynchronize(s->str));
+    CHECK_CUDA(cu_f, cuStreamSynchronize(s->host_stream));
     CHECK_CUDA(cu_f, cuEventDestroy(s->event));
     CHECK_CUDA(cu_f, cuEventDestroy(s->finished));
 

@@ -100,7 +100,7 @@ typedef struct write_score_parameters_ssim {
     int err; /* Read after callback completion. */
 } write_score_parameters_ssim;
 
-// iqa/math_utils.c _round: round half away from zero
+// Match IQA's rounding for positive dimensions.
 static int iqa_round(float a)
 {
     int sign_a = a > 0.0f ? 1 : -1;
@@ -295,8 +295,7 @@ static int extract_fex_cuda(VmafFeatureExtractor *fex, VmafPicture *ref_pic,
         &((write_score_parameters_ssim *)s->write_score_parameters)[slot];
     if (params->err) return params->err;
 
-    // kernels run on the extractor's own stream so they overlap with other
-    // extractors' work on the picture streams; wait for both uploads first
+    /* Wait for both producers before reading either picture. */
     CUDA_FEX_CHECK(cu_f, cuStreamWaitEvent(s->cuda.str,
                 vmaf_cuda_picture_get_ready_event(ref_pic),
                 CU_EVENT_WAIT_DEFAULT));
@@ -350,11 +349,7 @@ static int extract_fex_cuda(VmafFeatureExtractor *fex, VmafPicture *ref_pic,
         cmp_in = s->cmp_f;
     }
 
-    // lifetime handshake right after the only kernels that read picture
-    // memory: the pool recycles a picture once the `finished` event its own
-    // stream records (after the fex loop) has completed, so make both
-    // picture streams wait for those reads — everything below works on our
-    // own buffers and can outlive the pictures
+    /* Later kernels use private buffers, so the pictures can now be reused. */
     CUDA_FEX_CHECK(cu_f, cuEventRecord(s->cuda.consumed, s->cuda.str));
     CUDA_FEX_CHECK(cu_f, cuStreamWaitEvent(vmaf_cuda_picture_get_stream(ref_pic),
                 s->cuda.consumed, CU_EVENT_WAIT_DEFAULT));
@@ -421,8 +416,7 @@ static int flush_fex_cuda(VmafFeatureExtractor *fex,
     SsimStateCuda *s = fex->priv;
     CudaFunctions *cu_f = fex->cu_state->f;
 
-    // drain the pending write_scores host callback so the final frame's
-    // score is in the collector before anything reads it
+    /* Publish the final callback result before returning. */
     CUDA_FEX_CHECK(cu_f, cuStreamSynchronize(s->cuda.str));
     CUDA_FEX_CHECK(cu_f, cuStreamSynchronize(s->cuda.host_stream));
     write_score_parameters_ssim *params = s->write_score_parameters;

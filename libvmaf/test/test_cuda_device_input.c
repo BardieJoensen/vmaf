@@ -15,10 +15,9 @@
 #include "ref.h"
 
 #define FRAMES 33
-#define KEYS 6
+#define KEYS 4
 static const char *keys[KEYS] = {
-    "psnr_y", "psnr_cb", "psnr_cr", "float_ssim", "ciede2000",
-    "VMAF_integer_feature_motion2_score",
+    "psnr_y", "psnr_cb", "psnr_cr", "VMAF_integer_feature_vif_scale0_score",
 };
 
 static void fill(VmafPicture *ref, VmafPicture *dist, unsigned index)
@@ -100,10 +99,9 @@ static char *run(unsigned mode, unsigned threads, unsigned bpc,
             }
         }
     }
-    err = vmaf_use_feature(vmaf, mode && mode != 3 ? "psnr_cuda" : "psnr", NULL);
-    err |= vmaf_use_feature(vmaf, mode ? "ssim_cuda" : "float_ssim", NULL);
-    err |= vmaf_use_feature(vmaf, mode ? "ciede_cuda" : "ciede", NULL);
-    err |= vmaf_use_feature(vmaf, mode ? "motion_cuda" : "motion", NULL);
+    err = vmaf_use_feature(vmaf, mode ? "vif_cuda" : "vif", NULL);
+    if (mode == 0 || mode == 3)
+        err |= vmaf_use_feature(vmaf, "psnr", NULL);
     mu_assert("feature registration failed", !err);
     for (unsigned i = 0; i < FRAMES; i++) {
         VmafPicture ref, dist;
@@ -138,7 +136,8 @@ static char *run(unsigned mode, unsigned threads, unsigned bpc,
     mu_assert("device-input flush failed", !err);
     for (unsigned i = 0; i < FRAMES; i++)
         for (unsigned k = 0; k < KEYS; k++) {
-            if (subsample > 1 && i % subsample && (k == 3 || k == 4)) continue;
+            if ((mode == 1 || mode == 2) && k < 3) continue;
+            if (subsample > 1 && i % subsample && k == 3) continue;
             err = vmaf_feature_score_at_index(vmaf, keys[k], &scores[i][k], i);
             mu_assert("missing device-input score", !err);
         }
@@ -178,8 +177,9 @@ static char *test_device_input(void)
                     if (fail) return fail;
                     for (unsigned i = 0; i < FRAMES; i++)
                         for (unsigned k = 0; k < KEYS; k++) {
-                            if (sub > 1 && i % sub && (k == 3 || k == 4)) continue;
-                            const double eps = k == 4 ? 1e-3 : 1e-12;
+                            if (modes[m] != 3 && k < 3) continue;
+                            if (sub > 1 && i % sub && k == 3) continue;
+                            const double eps = 1e-12;
                             if (!isfinite(cpu[i][k]) || !isfinite(gpu[i][k]) ||
                                 fabs(cpu[i][k] - gpu[i][k]) > eps) {
                                 fprintf(stderr, "mode=%u threads=%u bpc=%u sub=%u frame=%u %s: CPU=%.12f CUDA=%.12f\n",

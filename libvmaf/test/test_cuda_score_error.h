@@ -41,6 +41,7 @@ static char *test_cuda_score_error(const char *feature, const char *key)
         }
         const int flush_err = vmaf_read_pictures(vmaf, NULL, NULL, 0);
         vmaf_close(vmaf);
+        free(state);
         mu_assert("pending CUDA callback error was lost during flush", flush_err < 0);
         if (frames == 3)
             mu_assert("CUDA callback error was lost when reusing a slot", extract_err < 0);

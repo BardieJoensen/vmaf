@@ -59,8 +59,21 @@ static int init_fex_cuda(VmafFeatureExtractor *fex, enum VmafPixelFormat pix_fmt
     CiedeStateCuda *s = fex->priv;
     CudaFunctions *cu_f = fex->cu_state->f;
 
-    if (!w || !h || pix_fmt == VMAF_PIX_FMT_YUV400P)
+    if (!w || !h)
         return -EINVAL;
+    /* Subsampled planes contain only complete pairs of luma samples. */
+    switch (pix_fmt) {
+    case VMAF_PIX_FMT_YUV420P:
+        if (h & 1) return -EINVAL;
+        /* fall through */
+    case VMAF_PIX_FMT_YUV422P:
+        if (w & 1) return -EINVAL;
+        break;
+    case VMAF_PIX_FMT_YUV444P:
+        break;
+    default:
+        return -EINVAL;
+    }
     switch (bpc) {
     case 8:
     case 10:
@@ -136,8 +149,7 @@ static int extract_fex_cuda(VmafFeatureExtractor *fex, VmafPicture *ref_pic,
         &((write_score_parameters_ciede *)s->write_score_parameters)[slot];
     if (params->err) return params->err;
 
-    // kernels run on the extractor's own stream so they overlap with other
-    // extractors' work on the picture streams; wait for both uploads first
+    /* Wait for both producers before reading either picture. */
     CUDA_FEX_CHECK(cu_f, cuStreamWaitEvent(s->cuda.str,
                 vmaf_cuda_picture_get_ready_event(ref_pic),
                 CU_EVENT_WAIT_DEFAULT));
@@ -159,9 +171,7 @@ static int extract_fex_cuda(VmafFeatureExtractor *fex, VmafPicture *ref_pic,
                     16, 16, 1, 0, s->cuda.str, kernel_params, NULL));
     }
 
-    // lifetime handshake: the pool recycles a picture once the `finished`
-    // event its own stream records (after the fex loop) has completed, so
-    // make both picture streams wait for our reads
+    /* Keep pooled pictures alive until the kernels finish reading them. */
     CUDA_FEX_CHECK(cu_f, cuEventRecord(s->cuda.consumed, s->cuda.str));
     CUDA_FEX_CHECK(cu_f, cuStreamWaitEvent(vmaf_cuda_picture_get_stream(ref_pic),
                 s->cuda.consumed, CU_EVENT_WAIT_DEFAULT));
@@ -193,8 +203,7 @@ static int flush_fex_cuda(VmafFeatureExtractor *fex,
     CiedeStateCuda *s = fex->priv;
     CudaFunctions *cu_f = fex->cu_state->f;
 
-    // drain the pending write_scores host callback so the final frame's
-    // score is in the collector before anything reads it
+    /* Publish the final callback result before returning. */
     CUDA_FEX_CHECK(cu_f, cuStreamSynchronize(s->cuda.str));
     CUDA_FEX_CHECK(cu_f, cuStreamSynchronize(s->cuda.host_stream));
     write_score_parameters_ciede *params = s->write_score_parameters;

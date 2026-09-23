@@ -20,6 +20,7 @@
  * A missing CUDA device is reported as a Meson SKIP (77). */
 
 #include <stdbool.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -70,8 +71,8 @@ static void fill_pictures(VmafPicture *ref, VmafPicture *dist, unsigned bpc,
                     int vd = v + noise;
                     if (vd < 0) vd = 0;
                     if (vd > (int)peak) vd = peak;
-                    r[j] = v;
-                    d[j] = vd;
+                    r[j] = index == N_FRAMES - 1 ? 0 : v;
+                    d[j] = index == N_FRAMES - 1 ? 0 : vd;
                 }
                 r += ref->stride[p];
                 d += dist->stride[p];
@@ -86,8 +87,8 @@ static void fill_pictures(VmafPicture *ref, VmafPicture *dist, unsigned bpc,
                     int vd = v + noise;
                     if (vd < 0) vd = 0;
                     if (vd > (int)peak) vd = peak;
-                    r[j] = v;
-                    d[j] = vd;
+                    r[j] = index == N_FRAMES - 1 ? 0 : v;
+                    d[j] = index == N_FRAMES - 1 ? 0 : vd;
                 }
                 r += ref->stride[p] / 2;
                 d += dist->stride[p] / 2;
@@ -96,7 +97,7 @@ static void fill_pictures(VmafPicture *ref, VmafPicture *dist, unsigned bpc,
     }
 }
 
-// returns 0 on success, 1 when CUDA is unavailable (caller should skip)
+/* Return 1 when CUDA is unavailable; report test failures through fail. */
 static int run_pass(int use_cuda, const ParityCase *test_case,
                     double scores[N_FRAMES][N_KEYS],
                     char **fail)
@@ -113,12 +114,13 @@ static int run_pass(int use_cuda, const ParityCase *test_case,
     err = vmaf_init(&vmaf, cfg);
     if (err) { *fail = "problem during vmaf_init"; return 0; }
 
+    VmafCudaState *cu_state = NULL;
     if (use_cuda) {
-        VmafCudaState *cu_state;
         VmafCudaConfiguration cuda_cfg = { 0 };
         err = vmaf_cuda_state_init(&cu_state, cuda_cfg);
         if (err) {
             vmaf_close(vmaf);
+            free(cu_state);
             return 1; // no CUDA device, skip
         }
         err = vmaf_cuda_import_state(vmaf, cu_state);
@@ -164,6 +166,7 @@ static int run_pass(int use_cuda, const ParityCase *test_case,
     }
 
     err = vmaf_close(vmaf);
+    free(cu_state);
     if (err) { *fail = "problem during vmaf_close"; return 0; }
 
     return 0;
@@ -178,8 +181,6 @@ static char *parity(const ParityCase *test_case)
     if (fail) return fail;
 
     if (run_pass(1, test_case, gpu, &fail)) {
-        // meson exitcode protocol: 77 = SKIP, so CI without a GPU reports
-        // this as skipped rather than silently passing
         fprintf(stderr, "no CUDA device available, skipping\n");
         exit(77);
     }
@@ -187,7 +188,11 @@ static char *parity(const ParityCase *test_case)
 
     for (unsigned i = 0; i < N_FRAMES; i++) {
         for (unsigned k = 0; k < N_KEYS; k++) {
-            if (memcmp(&cpu[i][k], &gpu[i][k], sizeof(cpu[i][k]))) {
+            const bool infinite = i == N_FRAMES - 1 && k == 0 &&
+                                  test_case->enable_db && !test_case->clip_db;
+            if (isnan(cpu[i][k]) || isnan(gpu[i][k]) ||
+                (!infinite && (!isfinite(cpu[i][k]) || !isfinite(gpu[i][k]))) ||
+                memcmp(&cpu[i][k], &gpu[i][k], sizeof(cpu[i][k]))) {
                 fprintf(stderr, "mismatch %s, frame %u, %s: "
                         "cpu=%a gpu=%a\n", test_case->name, i,
                         score_keys[k], cpu[i][k], gpu[i][k]);
@@ -195,6 +200,15 @@ static char *parity(const ParityCase *test_case)
             }
         }
     }
+
+    for (unsigned k = 1; k < N_KEYS; k++)
+        mu_assert("identical-picture SSIM component must equal one",
+                  gpu[N_FRAMES - 1][k] == 1.0);
+    if (!test_case->enable_db)
+        mu_assert("identical-picture SSIM must equal one", gpu[N_FRAMES - 1][0] == 1.0);
+    else if (!test_case->clip_db)
+        mu_assert("identical-picture SSIM dB must be positive infinity",
+                  isinf(gpu[N_FRAMES - 1][0]) && gpu[N_FRAMES - 1][0] > 0);
 
     return NULL;
 }
@@ -243,6 +257,16 @@ static char *test_ssim_cuda_parity_422_16bpc_scale_1_options(void)
     return parity(&test_case);
 }
 
+static char *test_ssim_cuda_unclipped_db(void)
+{
+    const ParityCase test_case = {
+        .name = "11x11 grayscale with unclipped dB",
+        .pix_fmt = VMAF_PIX_FMT_YUV400P,
+        .bpc = 8, .w = 11, .h = 11, .enable_db = true,
+    };
+    return parity(&test_case);
+}
+
 #include "test_cuda_score_error.h"
 
 static char *test_ssim_cuda_score_error(void)
@@ -256,6 +280,7 @@ char *run_tests()
     mu_run_test(test_ssim_cuda_parity_420_10bpc_auto_scale);
     mu_run_test(test_ssim_cuda_parity_444_12bpc_odd_scale_3);
     mu_run_test(test_ssim_cuda_parity_422_16bpc_scale_1_options);
+    mu_run_test(test_ssim_cuda_unclipped_db);
     mu_run_test(test_ssim_cuda_score_error);
     return NULL;
 }

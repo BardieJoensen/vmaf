@@ -20,6 +20,7 @@
  * A missing CUDA device is reported as a Meson SKIP (77). */
 
 #include <stdbool.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -75,8 +76,9 @@ static void fill_pictures(VmafPicture *ref, VmafPicture *dist, unsigned bpc,
                     int vd = v + noise;
                     if (vd < 0) vd = 0;
                     if (vd > (int)peak) vd = peak;
-                    r[j] = v;
-                    d[j] = vd;
+                    r[j] = index == N_FRAMES - 2 ? 0 : v;
+                    d[j] = index == N_FRAMES - 2 ? (int)peak :
+                           index == N_FRAMES - 1 ? v : vd;
                 }
                 r += ref->stride[p];
                 d += dist->stride[p];
@@ -91,8 +93,9 @@ static void fill_pictures(VmafPicture *ref, VmafPicture *dist, unsigned bpc,
                     int vd = v + noise;
                     if (vd < 0) vd = 0;
                     if (vd > (int)peak) vd = peak;
-                    r[j] = v;
-                    d[j] = vd;
+                    r[j] = index == N_FRAMES - 2 ? 0 : v;
+                    d[j] = index == N_FRAMES - 2 ? (int)peak :
+                           index == N_FRAMES - 1 ? v : vd;
                 }
                 r += ref->stride[p] / 2;
                 d += dist->stride[p] / 2;
@@ -148,7 +151,7 @@ static int read_apsnr(VmafContext *vmaf, double scores[N_APSNR], unsigned planes
     return 0;
 }
 
-// returns 0 on success, 1 when CUDA is unavailable (caller should skip)
+/* Return 1 when CUDA is unavailable; report test failures through fail. */
 static int run_pass(int use_cuda, const ParityCase *test_case,
                     double scores[N_FRAMES][N_KEYS],
                     double apsnr[N_APSNR], char **fail)
@@ -165,12 +168,13 @@ static int run_pass(int use_cuda, const ParityCase *test_case,
     err = vmaf_init(&vmaf, cfg);
     if (err) { *fail = "problem during vmaf_init"; return 0; }
 
+    VmafCudaState *cu_state = NULL;
     if (use_cuda) {
-        VmafCudaState *cu_state;
         VmafCudaConfiguration cuda_cfg = { 0 };
         err = vmaf_cuda_state_init(&cu_state, cuda_cfg);
         if (err) {
             vmaf_close(vmaf);
+            free(cu_state);
             return 1; // no CUDA device, skip
         }
         err = vmaf_cuda_import_state(vmaf, cu_state);
@@ -227,6 +231,7 @@ static int run_pass(int use_cuda, const ParityCase *test_case,
     }
 
     err = vmaf_close(vmaf);
+    free(cu_state);
     if (err) { *fail = "problem during vmaf_close"; return 0; }
 
     return 0;
@@ -242,8 +247,6 @@ static char *parity(const ParityCase *test_case)
     if (fail) return fail;
 
     if (run_pass(1, test_case, gpu, gpu_apsnr, &fail)) {
-        // meson exitcode protocol: 77 = SKIP, so CI without a GPU reports
-        // this as skipped rather than silently passing
         fprintf(stderr, "no CUDA device available, skipping\n");
         exit(77);
     }
@@ -253,7 +256,8 @@ static char *parity(const ParityCase *test_case)
         for (unsigned k = 0; k < N_KEYS; k++) {
             if ((test_case->disable_chroma || test_case->pix_fmt == VMAF_PIX_FMT_YUV400P) && k % 3)
                 continue;
-            if (memcmp(&cpu[i][k], &gpu[i][k], sizeof(cpu[i][k]))) {
+            if (!isfinite(cpu[i][k]) || !isfinite(gpu[i][k]) ||
+                memcmp(&cpu[i][k], &gpu[i][k], sizeof(cpu[i][k]))) {
                 fprintf(stderr, "mismatch %s, frame %u, %s: "
                         "cpu=%a gpu=%a\n", test_case->name, i,
                         score_keys[k], cpu[i][k], gpu[i][k]);
@@ -264,6 +268,24 @@ static char *parity(const ParityCase *test_case)
 
     const unsigned planes = test_case->disable_chroma || test_case->pix_fmt == VMAF_PIX_FMT_YUV400P ? 1 : 3;
     for (unsigned k = 0; k < planes; k++) {
+        const double peak = (1U << test_case->bpc) - 1;
+        mu_assert("incorrect maximum-difference MSE",
+                  gpu[N_FRAMES - 2][k + 3] == peak * peak);
+        mu_assert("identical pictures must have zero MSE",
+                  gpu[N_FRAMES - 1][k + 3] == 0.0);
+        double cap = 6 * test_case->bpc + 12;
+        if (test_case->min_sse > 0.0) {
+            const unsigned w = k && test_case->pix_fmt != VMAF_PIX_FMT_YUV444P ?
+                               test_case->w / 2 : test_case->w;
+            const unsigned h = k && test_case->pix_fmt == VMAF_PIX_FMT_YUV420P ?
+                               test_case->h / 2 : test_case->h;
+            const double p = test_case->reduced_hbd_peak ?
+                             255U << (test_case->bpc - 8) : peak;
+            cap = ceil(10.0 * log10(p * p / (test_case->min_sse / ((double)w * h))));
+        }
+        mu_assert("incorrect identical-picture PSNR cap",
+                  gpu[N_FRAMES - 1][k] == cap);
+        mu_assert("APSNR must be finite", isfinite(cpu_apsnr[k]) && isfinite(gpu_apsnr[k]));
         if (memcmp(&cpu_apsnr[k], &gpu_apsnr[k], sizeof(cpu_apsnr[k]))) {
             fprintf(stderr, "aggregate mismatch %s, %s: cpu=%a gpu=%a\n",
                     test_case->name, apsnr_keys[k], cpu_apsnr[k],

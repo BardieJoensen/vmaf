@@ -43,17 +43,10 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-/*
- * This implementation uses float32 color conversion and CIEDE math, with
- * double partial sums and deterministic host pooling. The CPU implementation
- * uses double color conversion and float LAB/CIEDE intermediates, together
- * with a different math library; bit-exact agreement is not expected.
- *
- * A 0.001 score tolerance is checked for the noisy-frame parity fixtures.
- * It is not a universal bound: near-identical colors can have larger score
- * differences because 45 - 20*log10(mean Delta E) magnifies errors near zero.
- * Accuracy should also be evaluated in the underlying mean Delta E domain.
- */
+/* Float color conversion differs from the CPU's double conversion.
+ * Double partial sums make pooling deterministic, not CPU-exact.
+ * Near-zero Delta E magnifies score errors through the logarithm;
+ * the parity fixture tolerance is not a universal accuracy bound. */
 
 #include "cuda_helper.cuh"
 

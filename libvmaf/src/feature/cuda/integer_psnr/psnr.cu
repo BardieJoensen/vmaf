@@ -20,9 +20,7 @@
 
 #include "common.h"
 
-// Block-reduce a per-thread value and let thread 0 issue ONE atomicAdd per
-// block: one atomic per warp serializes on the single global accumulator,
-// one per block is ~32x fewer
+// Reduce within each block to limit contention on the global accumulator.
 __device__ __forceinline__ void block_reduce_add(uint64_t v,
         unsigned long long *accum)
 {
@@ -49,10 +47,7 @@ __device__ __forceinline__ void block_reduce_add(uint64_t v,
 
 extern "C" {
 
-// Grid-stride over uchar4 vectors so each warp reads full 128-byte segments
-// (cuMemAllocPitch aligns every row start); the <=3 tail pixels of each row
-// when the width isn't a multiple of 4 are covered by a scalar per-row loop.
-// Integer sums are order-independent, so the score is unchanged.
+// Vectorize aligned rows; handle the remaining pixels with scalar loads.
 __global__ void psnr_kernel_8bpc(const VmafPicture ref, const VmafPicture dis,
         VmafCudaBuffer sse, unsigned plane, unsigned width, unsigned height)
 {
