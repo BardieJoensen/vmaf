@@ -168,7 +168,7 @@ static char *test_device_input(void)
 {
     const unsigned modes[] = { 3, 2, 1 };
     for (unsigned bpc = 8; bpc <= 10; bpc += 2) {
-        for (unsigned sub = 1; sub <= 3; sub += 2) {
+        for (unsigned sub = 1; sub <= 3; sub++) {
             double cpu[FRAMES][KEYS], gpu[FRAMES][KEYS];
             char *fail = run(0, 0, bpc, sub, cpu);
             if (fail) return fail;
