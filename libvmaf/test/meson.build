@@ -211,6 +211,13 @@ test_cuda_psnr_parity = executable('test_cuda_psnr_parity',
     dependencies : cuda_dependency,
 )
 test('test_cuda_psnr_parity', test_cuda_psnr_parity)
+test_cuda_ssim_parity = executable('test_cuda_ssim_parity',
+    ['test.c', 'test_cuda_ssim_parity.c'],
+    include_directories : [libvmaf_inc, test_inc],
+    link_with : get_option('default_library') == 'both' ? libvmaf.get_static_lib() : libvmaf,
+    dependencies : cuda_dependency,
+)
+test('test_cuda_ssim_parity', test_cuda_ssim_parity)
 endif
 
 test_pic_preallocation = executable('test_pic_preallocation',
