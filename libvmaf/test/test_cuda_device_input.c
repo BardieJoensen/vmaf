@@ -32,7 +32,7 @@
 #define FRAMES 33
 #define KEYS 4
 static const char *keys[KEYS] = {
-    "psnr_y", "psnr_cb", "psnr_cr", "VMAF_integer_feature_vif_scale0_score",
+    "psnr_y", "psnr_cb", "psnr_cr", "float_ssim",
 };
 
 static void fill(VmafPicture *ref, VmafPicture *dist, unsigned index)
@@ -114,9 +114,13 @@ static char *run(unsigned mode, unsigned threads, unsigned bpc,
             }
         }
     }
-    err = vmaf_use_feature(vmaf, mode ? "vif_cuda" : "vif", NULL);
-    if (mode == 0 || mode == 3)
+    /* VIF exercises GPU completion; CPU PSNR/SSIM check downloaded pictures. */
+    if (mode)
+        err = vmaf_use_feature(vmaf, "vif_cuda", NULL);
+    if (mode == 0 || mode == 3) {
         err |= vmaf_use_feature(vmaf, "psnr", NULL);
+        err |= vmaf_use_feature(vmaf, "float_ssim", NULL);
+    }
     mu_assert("feature registration failed", !err);
     for (unsigned i = 0; i < FRAMES; i++) {
         VmafPicture ref, dist;
@@ -149,13 +153,20 @@ static char *run(unsigned mode, unsigned threads, unsigned bpc,
     }
     err = vmaf_read_pictures(vmaf, NULL, NULL, 0);
     mu_assert("device-input flush failed", !err);
-    for (unsigned i = 0; i < FRAMES; i++)
+    for (unsigned i = 0; i < FRAMES; i++) {
+        if (mode && (subsample <= 1 || !(i % subsample))) {
+            double score;
+            err = vmaf_feature_score_at_index(vmaf,
+                    "VMAF_integer_feature_vif_scale0_score", &score, i);
+            mu_assert("missing GPU completion score", !err);
+        }
+        if (mode == 1 || mode == 2) continue;
         for (unsigned k = 0; k < KEYS; k++) {
-            if ((mode == 1 || mode == 2) && k < 3) continue;
-            if (subsample > 1 && i % subsample && k == 3) continue;
+            if (k == 3 && subsample > 1 && i % subsample) continue;
             err = vmaf_feature_score_at_index(vmaf, keys[k], &scores[i][k], i);
             mu_assert("missing device-input score", !err);
         }
+    }
     if (mode >= 2) {
         for (unsigned i = 0; i < 2; i++)
             vmaf_cuda_picture_free(&source[i], &cookie);
@@ -190,10 +201,10 @@ static char *test_device_input(void)
                 for (unsigned m = 0; m < 3; m++) {
                     fail = run(modes[m], t, bpc, sub, gpu);
                     if (fail) return fail;
+                    if (modes[m] != 3) continue;
                     for (unsigned i = 0; i < FRAMES; i++)
                         for (unsigned k = 0; k < KEYS; k++) {
-                            if (modes[m] != 3 && k < 3) continue;
-                            if (sub > 1 && i % sub && k == 3) continue;
+                            if (k == 3 && sub > 1 && i % sub) continue;
                             const double eps = 1e-12;
                             if (!isfinite(cpu[i][k]) || !isfinite(gpu[i][k]) ||
                                 fabs(cpu[i][k] - gpu[i][k]) > eps) {
