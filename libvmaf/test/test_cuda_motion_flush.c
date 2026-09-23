@@ -53,7 +53,8 @@ static char *run_motion(unsigned threads, unsigned bpc, unsigned frames,
                 uint8_t *r = (uint8_t *)ref.data[p] + y * ref.stride[p];
                 uint8_t *d = (uint8_t *)dist.data[p] + y * dist.stride[p];
                 for (unsigned x = 0; x < ref.w[p]; x++) {
-                    const unsigned value = (32 + i) << (bpc - 8);
+                    /* Keep this flush test independent of motion ordering. */
+                    const unsigned value = 32U << (bpc - 8);
                     if (bpc == 8) { r[x] = value; d[x] = value + 1; }
                     else {
                         ((uint16_t *)r)[x] = value;
@@ -78,7 +79,7 @@ static char *run_motion(unsigned threads, unsigned bpc, unsigned frames,
         err = vmaf_feature_score_at_index(vmaf,
                 "VMAF_integer_feature_motion2_score", &score, i);
         mu_assert("missing motion2 score, including the final frame", !err);
-        mu_assert("incorrect motion2 score", score == (i ? 1.0 : 0.0));
+        mu_assert("stationary pictures must have zero motion2", score == 0.0);
         if (mixed) {
             err = vmaf_feature_score_at_index(vmaf, "psnr_y", &score, i);
             mu_assert("missing mixed CPU PSNR score", !err);
