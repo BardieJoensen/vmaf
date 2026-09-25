@@ -1347,6 +1347,32 @@ static inline __m256i double_to_64(__m256d v) {
 }
 
 // No lzcnt in avx2
+// (double)(float)x for int64 lanes with |x| < 2^51. int64 -> double is exact
+// there (2^52 + 2^51 magic number), so the single rounding to float gives
+// the same value as the C cast of the int64.
+static inline __m256d i64_float_pd(__m256i x)
+{
+    const __m256d magic = _mm256_set1_pd(6755399441055744.0);
+    const __m256d d = _mm256_sub_pd(_mm256_castsi256_pd(
+        _mm256_add_epi64(x, _mm256_castpd_si256(magic))), magic);
+    return _mm256_cvtps_pd(_mm256_cvtpd_ps(d));
+}
+
+// calc_angle() for 4 int64 lanes, as a mask. The C code compares
+// (float)x / 4096.0 values in double; dropping the exact power-of-two
+// scale does not change any rounding. Requires |x| < 2^51 for all inputs.
+static inline __m256i calc_angle_s123_256(__m256i ot_dp, __m256i o_mag_sq,
+                                          __m256i t_mag_sq, double cos_1deg_sq)
+{
+    const __m256d dp = i64_float_pd(ot_dp);
+    const __m256d ge = _mm256_cmp_pd(_mm256_mul_pd(dp, dp),
+        _mm256_mul_pd(_mm256_mul_pd(_mm256_set1_pd(cos_1deg_sq),
+                                    i64_float_pd(o_mag_sq)),
+                      i64_float_pd(t_mag_sq)), _CMP_GE_OQ);
+    return _mm256_andnot_si256(_mm256_cmpgt_epi64(_mm256_setzero_si256(), ot_dp),
+                               _mm256_castpd_si256(ge));
+}
+
 void adm_decouple_s123_avx2(AdmBuffer *buf, int w, int h, int stride,
                               double adm_enhn_gain_limit, int32_t* adm_div_lookup)
 {
@@ -1428,18 +1454,39 @@ void adm_decouple_s123_avx2(AdmBuffer *buf, int w, int h, int stride,
             __m256i t_mag_sq_hi_epi64 = _mm256_add_epi64(_mm256_mul_epi32(th_hi_epi64, th_hi_epi64),
                                                       _mm256_mul_epi32(tv_hi_epi64, tv_hi_epi64));
 
-            // angle_flag as int64
-            int64_t angle_flag[8];
-            calc_angle(extract_epi64(ot_dp_lo_epi64, 0), extract_epi64(o_mag_sq_lo_epi64, 0), extract_epi64(t_mag_sq_lo_epi64, 0), angle_flag[0]);
-            calc_angle(extract_epi64(ot_dp_lo_epi64, 1), extract_epi64(o_mag_sq_lo_epi64, 1), extract_epi64(t_mag_sq_lo_epi64, 1), angle_flag[1]);
-            calc_angle(extract_epi64(ot_dp_lo_epi64, 2), extract_epi64(o_mag_sq_lo_epi64, 2), extract_epi64(t_mag_sq_lo_epi64, 2), angle_flag[2]);
-            calc_angle(extract_epi64(ot_dp_lo_epi64, 3), extract_epi64(o_mag_sq_lo_epi64, 3), extract_epi64(t_mag_sq_lo_epi64, 3), angle_flag[3]);
-            calc_angle(extract_epi64(ot_dp_hi_epi64, 0), extract_epi64(o_mag_sq_hi_epi64, 0), extract_epi64(t_mag_sq_hi_epi64, 0), angle_flag[4]);
-            calc_angle(extract_epi64(ot_dp_hi_epi64, 1), extract_epi64(o_mag_sq_hi_epi64, 1), extract_epi64(t_mag_sq_hi_epi64, 1), angle_flag[5]);
-            calc_angle(extract_epi64(ot_dp_hi_epi64, 2), extract_epi64(o_mag_sq_hi_epi64, 2), extract_epi64(t_mag_sq_hi_epi64, 2), angle_flag[6]);
-            calc_angle(extract_epi64(ot_dp_hi_epi64, 3), extract_epi64(o_mag_sq_hi_epi64, 3), extract_epi64(t_mag_sq_hi_epi64, 3), angle_flag[7]);
-            __m256i angle_flag_lo_epi64 = _mm256_loadu_si256((__m256i*) (&angle_flag[0]));
-            __m256i angle_flag_hi_epi64 = _mm256_loadu_si256((__m256i*) (&angle_flag[4]));
+            // angle_flag as int64 (nonzero where set). |ot_dp| is at most
+            // sqrt(o_mag_sq * t_mag_sq), so the vector path is exact whenever
+            // both squared magnitudes are in [0, 2^51); otherwise use the
+            // scalar macro.
+            __m256i angle_flag_lo_epi64, angle_flag_hi_epi64;
+            const __m256i mag_limit = _mm256_set1_epi64x((1LL << 51) - 1);
+            const __m256i mag_out = _mm256_or_si256(
+                _mm256_or_si256(_mm256_cmpgt_epi64(o_mag_sq_lo_epi64, mag_limit),
+                                _mm256_cmpgt_epi64(o_mag_sq_hi_epi64, mag_limit)),
+                _mm256_or_si256(_mm256_cmpgt_epi64(t_mag_sq_lo_epi64, mag_limit),
+                                _mm256_cmpgt_epi64(t_mag_sq_hi_epi64, mag_limit)));
+            const __m256i mag_neg = _mm256_or_si256(
+                _mm256_or_si256(o_mag_sq_lo_epi64, o_mag_sq_hi_epi64),
+                _mm256_or_si256(t_mag_sq_lo_epi64, t_mag_sq_hi_epi64));
+            if (_mm256_testz_si256(mag_out, mag_out) &&
+                !_mm256_movemask_pd(_mm256_castsi256_pd(mag_neg))) {
+                angle_flag_lo_epi64 = calc_angle_s123_256(ot_dp_lo_epi64,
+                    o_mag_sq_lo_epi64, t_mag_sq_lo_epi64, cos_1deg_sq);
+                angle_flag_hi_epi64 = calc_angle_s123_256(ot_dp_hi_epi64,
+                    o_mag_sq_hi_epi64, t_mag_sq_hi_epi64, cos_1deg_sq);
+            } else {
+                int64_t angle_flag[8];
+                calc_angle(extract_epi64(ot_dp_lo_epi64, 0), extract_epi64(o_mag_sq_lo_epi64, 0), extract_epi64(t_mag_sq_lo_epi64, 0), angle_flag[0]);
+                calc_angle(extract_epi64(ot_dp_lo_epi64, 1), extract_epi64(o_mag_sq_lo_epi64, 1), extract_epi64(t_mag_sq_lo_epi64, 1), angle_flag[1]);
+                calc_angle(extract_epi64(ot_dp_lo_epi64, 2), extract_epi64(o_mag_sq_lo_epi64, 2), extract_epi64(t_mag_sq_lo_epi64, 2), angle_flag[2]);
+                calc_angle(extract_epi64(ot_dp_lo_epi64, 3), extract_epi64(o_mag_sq_lo_epi64, 3), extract_epi64(t_mag_sq_lo_epi64, 3), angle_flag[3]);
+                calc_angle(extract_epi64(ot_dp_hi_epi64, 0), extract_epi64(o_mag_sq_hi_epi64, 0), extract_epi64(t_mag_sq_hi_epi64, 0), angle_flag[4]);
+                calc_angle(extract_epi64(ot_dp_hi_epi64, 1), extract_epi64(o_mag_sq_hi_epi64, 1), extract_epi64(t_mag_sq_hi_epi64, 1), angle_flag[5]);
+                calc_angle(extract_epi64(ot_dp_hi_epi64, 2), extract_epi64(o_mag_sq_hi_epi64, 2), extract_epi64(t_mag_sq_hi_epi64, 2), angle_flag[6]);
+                calc_angle(extract_epi64(ot_dp_hi_epi64, 3), extract_epi64(o_mag_sq_hi_epi64, 3), extract_epi64(t_mag_sq_hi_epi64, 3), angle_flag[7]);
+                angle_flag_lo_epi64 = _mm256_loadu_si256((__m256i*) (&angle_flag[0]));
+                angle_flag_hi_epi64 = _mm256_loadu_si256((__m256i*) (&angle_flag[4]));
+            }
 
             __m256i abs_oh_epi32 = _mm256_abs_epi32(oh_epi32);
             __m256i abs_ov_epi32 = _mm256_abs_epi32(ov_epi32);
