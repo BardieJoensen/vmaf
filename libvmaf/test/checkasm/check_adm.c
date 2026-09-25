@@ -468,11 +468,13 @@ static const struct { int w, h; } post_dwt_sizes[] = {
     { 64, 48 },
 };
 
-// adm_enhn_gain_limit values the decouple tests run with: the default and
-// the one used by the vmaf_*neg models.
+// adm_enhn_gain_limit values the decouple tests run with: the default, the
+// one used by the vmaf_*neg models, and a fractional one, for which
+// rst * gain is not an integer and has to be truncated like the C code does.
 static const double gain_limits[] = {
     DEFAULT_ADM_ENHN_GAIN_LIMIT,
     1.0,
+    1.2,
 };
 
 static void check_adm_decouple(void)

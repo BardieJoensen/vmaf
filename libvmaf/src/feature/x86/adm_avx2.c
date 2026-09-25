@@ -840,13 +840,13 @@ void adm_decouple_avx2(AdmBuffer *buf, int w, int h, int stride,
 	    __m256d adm_gain_d = _mm256_set1_pd(adm_enhn_gain_limit);
             __m256d rst_h_gainlo_d = _mm256_mul_pd(_mm256_cvtepi32_pd(_mm256_extractf128_si256(rst_h, 0)), adm_gain_d);
             __m256d rst_h_gainhi_d = _mm256_mul_pd(_mm256_cvtepi32_pd(_mm256_extractf128_si256(rst_h, 1)), adm_gain_d);
-            __m256i rst_h_gain = _mm256_insertf128_si256(_mm256_castsi128_si256(_mm256_cvtpd_epi32(rst_h_gainlo_d)), _mm256_cvtpd_epi32(rst_h_gainhi_d),1);
+            __m256i rst_h_gain = _mm256_insertf128_si256(_mm256_castsi128_si256(_mm256_cvttpd_epi32(rst_h_gainlo_d)), _mm256_cvttpd_epi32(rst_h_gainhi_d),1);
             __m256d rst_v_gainlo_d = _mm256_mul_pd(_mm256_cvtepi32_pd(_mm256_extractf128_si256(rst_v, 0)), adm_gain_d);
             __m256d rst_v_gainhi_d = _mm256_mul_pd(_mm256_cvtepi32_pd(_mm256_extractf128_si256(rst_v, 1)), adm_gain_d);
-            __m256i rst_v_gain = _mm256_insertf128_si256(_mm256_castsi128_si256(_mm256_cvtpd_epi32(rst_v_gainlo_d)), _mm256_cvtpd_epi32(rst_v_gainhi_d),1);
+            __m256i rst_v_gain = _mm256_insertf128_si256(_mm256_castsi128_si256(_mm256_cvttpd_epi32(rst_v_gainlo_d)), _mm256_cvttpd_epi32(rst_v_gainhi_d),1);
             __m256d rst_d_gainlo_d = _mm256_mul_pd(_mm256_cvtepi32_pd(_mm256_extractf128_si256(rst_d, 0)), adm_gain_d);
             __m256d rst_d_gainhi_d = _mm256_mul_pd(_mm256_cvtepi32_pd(_mm256_extractf128_si256(rst_d, 1)), adm_gain_d);
-            __m256i rst_d_gain = _mm256_insertf128_si256(_mm256_castsi128_si256(_mm256_cvtpd_epi32(rst_d_gainlo_d)), _mm256_cvtpd_epi32(rst_d_gainhi_d),1);
+            __m256i rst_d_gain = _mm256_insertf128_si256(_mm256_castsi128_si256(_mm256_cvttpd_epi32(rst_d_gainlo_d)), _mm256_cvttpd_epi32(rst_d_gainhi_d),1);
 
             __m256i h_min = _mm256_min_epi32(rst_h_gain, th);
             __m256i v_min = _mm256_min_epi32(rst_v_gain, tv);
