@@ -1054,6 +1054,11 @@ static void check_adm_i4_cm(void)
 
 void checkasm_check_adm(void)
 {
+    // div_lookup is a static array in integer_adm.h, so this file has its
+    // own copy and must fill it; left zeroed, the decouple tests degenerate
+    // to kh = 0 and never reach the angle-flag or enhancement-gain paths.
+    div_lookup_generator();
+
     check_adm_dwt2();
     checkasm_report("adm_dwt2");
 
