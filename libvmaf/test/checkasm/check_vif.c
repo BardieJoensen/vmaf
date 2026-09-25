@@ -118,6 +118,10 @@ static subsample_rd_16_fn get_subsample_rd_16(unsigned cpu_flags)
 }
 
 static const struct { unsigned w, h; } sizes[] = {
+    { 9,   9 },
+    { 16,  16 },
+    { 23,  17 },
+    { 31,  25 },
     { 32,  32 },
     { 64,  36 },
     { 173, 41 },
