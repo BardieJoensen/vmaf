@@ -284,6 +284,28 @@ static void fill_band(int16_t *band, int rows, int stride)
                 (int16_t) ((checkasm_rand_uint32() % 16001) - 8000);
 }
 
+// Distorted band that tracks the reference: per sample a copy, a copy with
+// small additive noise, a copy scaled by 60/64..73/64, or an unrelated
+// value. Independent random bands are almost never within the 1 degree
+// angle adm_decouple*() tests for, so they never reach the angle-flag and
+// enhancement-gain code; real distorted content mostly does.
+static void fill_band_tracking(int16_t *dis, const int16_t *ref, int rows,
+                               int stride)
+{
+    if (!dis || !ref) return;
+    for (int i = 0; i < rows * stride; i++) {
+        const uint32_t r = checkasm_rand_uint32();
+        int32_t v = ref[i];
+        switch (r & 3) {
+        case 0: break;
+        case 1: v += (int32_t) ((r >> 8) % 7) - 3; break;
+        case 2: v = v * (int32_t) (60 + (r >> 8) % 14) / 64; break;
+        case 3: v = (int32_t) ((r >> 8) % 16001) - 8000; break;
+        }
+        dis[i] = (int16_t) v;
+    }
+}
+
 static void copy_band(int16_t *dst, const int16_t *src, int rows, int stride)
 {
     if (!dst || !src) return;
@@ -304,6 +326,39 @@ static void fill_band_i32(int32_t *band, int rows, int stride)
         for (int j = 0; j < stride; j++)
             band[i * stride + j] =
                 (int32_t) ((checkasm_rand_uint32() % 16001) - 8000);
+}
+
+// Scale 1-3 bands grow with every scale: spread the magnitudes over
+// 0..2^23 so that each vector mixes samples below and above 32768, where
+// adm_decouple_s123() switches to get_best15_from32().
+static void fill_band_i32_wide(int32_t *band, int rows, int stride)
+{
+    if (!band) return;
+    for (int i = 0; i < rows; i++)
+        for (int j = 0; j < stride; j++) {
+            const uint32_t r = checkasm_rand_uint32();
+            const int32_t v = (int32_t) (checkasm_rand_uint32() &
+                                         ((2u << (r % 23)) - 1));
+            band[i * stride + j] = (r & 0x80000000u) ? -v : v;
+        }
+}
+
+static void fill_band_i32_tracking(int32_t *dis, const int32_t *ref, int rows,
+                                   int stride)
+{
+    if (!dis || !ref) return;
+    for (int i = 0; i < rows * stride; i++) {
+        const uint32_t r = checkasm_rand_uint32();
+        int64_t v = ref[i];
+        switch (r & 3) {
+        case 0: break;
+        case 1: v += (int64_t) ((r >> 8) % 7) - 3; break;
+        case 2: v = v * (int64_t) (60 + (r >> 8) % 14) / 64; break;
+        case 3: v = (int64_t) (checkasm_rand_uint32() & ((1u << 23) - 1)) -
+                    (1 << 22); break;
+        }
+        dis[i] = (int32_t) v;
+    }
 }
 
 static void copy_band_i32(int32_t *dst, const int32_t *src, int rows,
@@ -413,6 +468,13 @@ static const struct { int w, h; } post_dwt_sizes[] = {
     { 64, 48 },
 };
 
+// adm_enhn_gain_limit values the decouple tests run with: the default and
+// the one used by the vmaf_*neg models.
+static const double gain_limits[] = {
+    DEFAULT_ADM_ENHN_GAIN_LIMIT,
+    1.0,
+};
+
 static void check_adm_decouple(void)
 {
     for (size_t i = 0; i < sizeof(post_dwt_sizes) / sizeof(*post_dwt_sizes);
@@ -433,10 +495,14 @@ static void check_adm_decouple(void)
         fill_band(buf_c.ref_dwt2.band_h, h_half, stride);
         fill_band(buf_c.ref_dwt2.band_v, h_half, stride);
         fill_band(buf_c.ref_dwt2.band_d, h_half, stride);
-        fill_band(buf_c.dis_dwt2.band_a, h_half, stride);
-        fill_band(buf_c.dis_dwt2.band_h, h_half, stride);
-        fill_band(buf_c.dis_dwt2.band_v, h_half, stride);
-        fill_band(buf_c.dis_dwt2.band_d, h_half, stride);
+        fill_band_tracking(buf_c.dis_dwt2.band_a, buf_c.ref_dwt2.band_a,
+                           h_half, stride);
+        fill_band_tracking(buf_c.dis_dwt2.band_h, buf_c.ref_dwt2.band_h,
+                           h_half, stride);
+        fill_band_tracking(buf_c.dis_dwt2.band_v, buf_c.ref_dwt2.band_v,
+                           h_half, stride);
+        fill_band_tracking(buf_c.dis_dwt2.band_d, buf_c.ref_dwt2.band_d,
+                           h_half, stride);
 
         copy_band(buf_a.ref_dwt2.band_a, buf_c.ref_dwt2.band_a, h_half, stride);
         copy_band(buf_a.ref_dwt2.band_h, buf_c.ref_dwt2.band_h, h_half, stride);
@@ -452,23 +518,27 @@ static void check_adm_decouple(void)
         if (checkasm_check_func(get_decouple(checkasm_get_cpu_flags()),
                                  "adm_decouple_%dx%d", w, h))
         {
-            checkasm_call_ref(&buf_c, w_half, h_half, stride,
-                               DEFAULT_ADM_ENHN_GAIN_LIMIT, div_lookup);
-            checkasm_call_new(&buf_a, w_half, h_half, stride,
-                               DEFAULT_ADM_ENHN_GAIN_LIMIT, div_lookup);
+            for (size_t g = 0; g < sizeof(gain_limits) / sizeof(*gain_limits);
+                 g++)
+            {
+                checkasm_call_ref(&buf_c, w_half, h_half, stride,
+                                   gain_limits[g], div_lookup);
+                checkasm_call_new(&buf_a, w_half, h_half, stride,
+                                   gain_limits[g], div_lookup);
 
-            check2d_band(buf_c.decouple_r.band_h, buf_a.decouple_r.band_h,
-                         w_half, h_half, stride, "decouple_r.band_h");
-            check2d_band(buf_c.decouple_r.band_v, buf_a.decouple_r.band_v,
-                         w_half, h_half, stride, "decouple_r.band_v");
-            check2d_band(buf_c.decouple_r.band_d, buf_a.decouple_r.band_d,
-                         w_half, h_half, stride, "decouple_r.band_d");
-            check2d_band(buf_c.decouple_a.band_h, buf_a.decouple_a.band_h,
-                         w_half, h_half, stride, "decouple_a.band_h");
-            check2d_band(buf_c.decouple_a.band_v, buf_a.decouple_a.band_v,
-                         w_half, h_half, stride, "decouple_a.band_v");
-            check2d_band(buf_c.decouple_a.band_d, buf_a.decouple_a.band_d,
-                         w_half, h_half, stride, "decouple_a.band_d");
+                check2d_band(buf_c.decouple_r.band_h, buf_a.decouple_r.band_h,
+                             w_half, h_half, stride, "decouple_r.band_h");
+                check2d_band(buf_c.decouple_r.band_v, buf_a.decouple_r.band_v,
+                             w_half, h_half, stride, "decouple_r.band_v");
+                check2d_band(buf_c.decouple_r.band_d, buf_a.decouple_r.band_d,
+                             w_half, h_half, stride, "decouple_r.band_d");
+                check2d_band(buf_c.decouple_a.band_h, buf_a.decouple_a.band_h,
+                             w_half, h_half, stride, "decouple_a.band_h");
+                check2d_band(buf_c.decouple_a.band_v, buf_a.decouple_a.band_v,
+                             w_half, h_half, stride, "decouple_a.band_v");
+                check2d_band(buf_c.decouple_a.band_d, buf_a.decouple_a.band_d,
+                             w_half, h_half, stride, "decouple_a.band_d");
+            }
 
             checkasm_bench_new(&buf_a, w_half, h_half, stride,
                                 DEFAULT_ADM_ENHN_GAIN_LIMIT, div_lookup);
@@ -720,14 +790,18 @@ static void check_adm_decouple_s123(void)
         const int stride = (int) (buf_c.ind_size_x >> 2);
         const int w_half = (w + 1) / 2, h_half = (h + 1) / 2;
 
-        fill_band_i32(buf_c.i4_ref_dwt2.band_a, h_half, stride);
-        fill_band_i32(buf_c.i4_ref_dwt2.band_h, h_half, stride);
-        fill_band_i32(buf_c.i4_ref_dwt2.band_v, h_half, stride);
-        fill_band_i32(buf_c.i4_ref_dwt2.band_d, h_half, stride);
-        fill_band_i32(buf_c.i4_dis_dwt2.band_a, h_half, stride);
-        fill_band_i32(buf_c.i4_dis_dwt2.band_h, h_half, stride);
-        fill_band_i32(buf_c.i4_dis_dwt2.band_v, h_half, stride);
-        fill_band_i32(buf_c.i4_dis_dwt2.band_d, h_half, stride);
+        fill_band_i32_wide(buf_c.i4_ref_dwt2.band_a, h_half, stride);
+        fill_band_i32_wide(buf_c.i4_ref_dwt2.band_h, h_half, stride);
+        fill_band_i32_wide(buf_c.i4_ref_dwt2.band_v, h_half, stride);
+        fill_band_i32_wide(buf_c.i4_ref_dwt2.band_d, h_half, stride);
+        fill_band_i32_tracking(buf_c.i4_dis_dwt2.band_a,
+                               buf_c.i4_ref_dwt2.band_a, h_half, stride);
+        fill_band_i32_tracking(buf_c.i4_dis_dwt2.band_h,
+                               buf_c.i4_ref_dwt2.band_h, h_half, stride);
+        fill_band_i32_tracking(buf_c.i4_dis_dwt2.band_v,
+                               buf_c.i4_ref_dwt2.band_v, h_half, stride);
+        fill_band_i32_tracking(buf_c.i4_dis_dwt2.band_d,
+                               buf_c.i4_ref_dwt2.band_d, h_half, stride);
 
         copy_band_i32(buf_a.i4_ref_dwt2.band_a, buf_c.i4_ref_dwt2.band_a,
                       h_half, stride);
@@ -751,29 +825,33 @@ static void check_adm_decouple_s123(void)
         if (checkasm_check_func(get_decouple_s123(checkasm_get_cpu_flags()),
                                  "adm_decouple_s123_%dx%d", w, h))
         {
-            checkasm_call_ref(&buf_c, w_half, h_half, stride,
-                               DEFAULT_ADM_ENHN_GAIN_LIMIT, div_lookup);
-            checkasm_call_new(&buf_a, w_half, h_half, stride,
-                               DEFAULT_ADM_ENHN_GAIN_LIMIT, div_lookup);
+            for (size_t g = 0; g < sizeof(gain_limits) / sizeof(*gain_limits);
+                 g++)
+            {
+                checkasm_call_ref(&buf_c, w_half, h_half, stride,
+                                   gain_limits[g], div_lookup);
+                checkasm_call_new(&buf_a, w_half, h_half, stride,
+                                   gain_limits[g], div_lookup);
 
-            check2d_band_i32(buf_c.i4_decouple_r.band_h,
-                             buf_a.i4_decouple_r.band_h, w_half, h_half,
-                             stride, "i4_decouple_r.band_h");
-            check2d_band_i32(buf_c.i4_decouple_r.band_v,
-                             buf_a.i4_decouple_r.band_v, w_half, h_half,
-                             stride, "i4_decouple_r.band_v");
-            check2d_band_i32(buf_c.i4_decouple_r.band_d,
-                             buf_a.i4_decouple_r.band_d, w_half, h_half,
-                             stride, "i4_decouple_r.band_d");
-            check2d_band_i32(buf_c.i4_decouple_a.band_h,
-                             buf_a.i4_decouple_a.band_h, w_half, h_half,
-                             stride, "i4_decouple_a.band_h");
-            check2d_band_i32(buf_c.i4_decouple_a.band_v,
-                             buf_a.i4_decouple_a.band_v, w_half, h_half,
-                             stride, "i4_decouple_a.band_v");
-            check2d_band_i32(buf_c.i4_decouple_a.band_d,
-                             buf_a.i4_decouple_a.band_d, w_half, h_half,
-                             stride, "i4_decouple_a.band_d");
+                check2d_band_i32(buf_c.i4_decouple_r.band_h,
+                                 buf_a.i4_decouple_r.band_h, w_half, h_half,
+                                 stride, "i4_decouple_r.band_h");
+                check2d_band_i32(buf_c.i4_decouple_r.band_v,
+                                 buf_a.i4_decouple_r.band_v, w_half, h_half,
+                                 stride, "i4_decouple_r.band_v");
+                check2d_band_i32(buf_c.i4_decouple_r.band_d,
+                                 buf_a.i4_decouple_r.band_d, w_half, h_half,
+                                 stride, "i4_decouple_r.band_d");
+                check2d_band_i32(buf_c.i4_decouple_a.band_h,
+                                 buf_a.i4_decouple_a.band_h, w_half, h_half,
+                                 stride, "i4_decouple_a.band_h");
+                check2d_band_i32(buf_c.i4_decouple_a.band_v,
+                                 buf_a.i4_decouple_a.band_v, w_half, h_half,
+                                 stride, "i4_decouple_a.band_v");
+                check2d_band_i32(buf_c.i4_decouple_a.band_d,
+                                 buf_a.i4_decouple_a.band_d, w_half, h_half,
+                                 stride, "i4_decouple_a.band_d");
+            }
 
             checkasm_bench_new(&buf_a, w_half, h_half, stride,
                                 DEFAULT_ADM_ENHN_GAIN_LIMIT, div_lookup);
