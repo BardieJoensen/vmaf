@@ -121,7 +121,68 @@ static const struct { unsigned w, h; } sizes[] = {
     { 32,  32 },
     { 64,  36 },
     { 173, 41 },
+    { 480, 64 },
 };
+
+enum vif_pattern {
+    VIF_NOISE,    // independent noise: large sigma1_sq, sigma12 ~ 0
+    VIF_FLAT,     // flat blocks, sparse +-1: sigma1_sq < 2 * 65536 branch
+    VIF_TRACKING, // dis = ref + small noise: sigma12 > 0, g near 1
+    VIF_EXTREME,  // full-range checkerboard: the largest variances
+    VIF_N_PATTERNS,
+};
+
+static const char *const vif_pattern_names[VIF_N_PATTERNS] = {
+    "noise", "flat", "tracking", "extreme",
+};
+
+// vif_enhn_gain_limit values: the default, and the 1.0 of the NEG models,
+// which clamps g on most of the tracking content.
+static const double vif_gain_limits[] = { DEFAULT_VIF_ENHN_GAIN_LIMIT, 1.0 };
+
+static unsigned clip_sample(int v, unsigned max)
+{
+    return v < 0 ? 0 : v > (int) max ? max : (unsigned) v;
+}
+
+static void fill_vif_planes(void *ref, void *dis, ptrdiff_t stride,
+                            unsigned w, unsigned h, int bpc,
+                            enum vif_pattern pattern)
+{
+    const unsigned max = (1u << bpc) - 1;
+    for (unsigned r = 0; r < h; r++)
+        for (unsigned c = 0; c < w; c++) {
+            const uint32_t x = checkasm_rand_uint32();
+            unsigned rv, dv;
+            switch (pattern) {
+            case VIF_FLAT:
+                rv = (((r / 32) * 7 + (c / 32) * 13) % 11) * max / 10;
+                if (x % 29 == 0) rv = rv ? rv - 1 : 1;
+                dv = rv;
+                if ((x >> 8) % 31 == 0) dv = dv < max ? dv + 1 : dv - 1;
+                break;
+            case VIF_TRACKING:
+                rv = x & max;
+                dv = clip_sample((int) rv + (int) ((x >> 20) % 9) - 4, max);
+                break;
+            case VIF_EXTREME:
+                rv = ((r ^ c) & 1) ? max : 0;
+                dv = ((x >> 3) % 5) ? rv : max - rv;
+                break;
+            default:
+                rv = x & max;
+                dv = checkasm_rand_uint32() & max;
+                break;
+            }
+            if (bpc == 8) {
+                ((uint8_t *) ref)[r * stride + c] = (uint8_t) rv;
+                ((uint8_t *) dis)[r * stride + c] = (uint8_t) dv;
+            } else {
+                ((uint16_t *) ref)[r * stride + c] = (uint16_t) rv;
+                ((uint16_t *) dis)[r * stride + c] = (uint16_t) dv;
+            }
+        }
+}
 
 static void check_vif_statistic_8(void)
 {
@@ -132,33 +193,43 @@ static void check_vif_statistic_8(void)
                               "vif_statistic_8"))
         return;
 
-    for (size_t i = 0; i < sizeof(sizes) / sizeof(*sizes); i++) {
-        const unsigned w = sizes[i].w, h = sizes[i].h;
+    for (int p = 0; p < VIF_N_PATTERNS; p++) {
+        for (size_t i = 0; i < sizeof(sizes) / sizeof(*sizes); i++) {
+            const unsigned w = sizes[i].w, h = sizes[i].h;
 
-        VifPublicState s;
-        if (vif_buffer_alloc(&s.buf, w, h, 8)) continue;
-        log_generate(s.log2_table);
-        s.vif_enhn_gain_limit = DEFAULT_VIF_ENHN_GAIN_LIMIT;
+            VifPublicState s;
+            if (vif_buffer_alloc(&s.buf, w, h, 8)) continue;
+            log_generate(s.log2_table);
 
-        uint8_t *ref = s.buf.ref, *dis = s.buf.dis;
-        for (unsigned r = 0; r < h; r++)
-            for (unsigned c = 0; c < w; c++) {
-                ref[r * s.buf.stride + c] = (uint8_t) checkasm_rand_uint32();
-                dis[r * s.buf.stride + c] = (uint8_t) checkasm_rand_uint32();
+            fill_vif_planes(s.buf.ref, s.buf.dis, s.buf.stride, w, h, 8, p);
+            pad_top_and_bottom(s.buf, h, vif_filter1d_width[0]);
+
+            float num_c = 0, den_c = 0, num_a = 0, den_a = 0;
+            for (size_t g = 0;
+                 g < sizeof(vif_gain_limits) / sizeof(*vif_gain_limits); g++)
+            {
+                s.vif_enhn_gain_limit = vif_gain_limits[g];
+                checkasm_call_ref(&s, &num_c, &den_c, w, h);
+                checkasm_call_new(&s, &num_a, &den_a, w, h);
+
+                if (num_c != num_a || den_c != den_a) {
+                    if (checkasm_fail())
+                        fprintf(stderr,
+                                "%s %ux%u gain_limit=%g: expected {%f,%f}, "
+                                "got {%f,%f}\n",
+                                vif_pattern_names[p], w, h,
+                                vif_gain_limits[g], num_c, den_c, num_a,
+                                den_a);
+                }
             }
-        pad_top_and_bottom(s.buf, h, vif_filter1d_width[0]);
 
-        float num_c = 0, den_c = 0, num_a = 0, den_a = 0;
-        checkasm_call_ref(&s, &num_c, &den_c, w, h);
-        checkasm_call_new(&s, &num_a, &den_a, w, h);
+            if (p == VIF_TRACKING && i == sizeof(sizes) / sizeof(*sizes) - 1) {
+                s.vif_enhn_gain_limit = DEFAULT_VIF_ENHN_GAIN_LIMIT;
+                checkasm_bench_new(&s, &num_a, &den_a, w, h);
+            }
 
-        if (num_c != num_a || den_c != den_a) {
-            if (checkasm_fail())
-                fprintf(stderr, "%ux%u: expected {%f,%f}, got {%f,%f}\n", w,
-                        h, num_c, den_c, num_a, den_a);
+            vif_buffer_free(&s.buf);
         }
-
-        vif_buffer_free(&s.buf);
     }
 }
 
@@ -167,50 +238,60 @@ static void check_vif_statistic_16(void)
     checkasm_declare(void, struct VifPublicState *, float *, float *,
                       unsigned, unsigned, int, int);
 
-    if (!checkasm_check_func(get_vif_statistic_16(checkasm_get_cpu_flags()),
-                              "vif_statistic_16"))
-        return;
-
     static const struct { int bpc, scale; } configs[] = {
         { 10, 0 }, { 12, 0 }, { 16, 0 },
         { 10, 1 }, { 10, 2 }, { 10, 3 },
     };
 
-    for (size_t i = 0; i < sizeof(sizes) / sizeof(*sizes); i++) {
-        for (size_t j = 0; j < sizeof(configs) / sizeof(*configs); j++) {
-            const unsigned w = sizes[i].w, h = sizes[i].h;
-            const int bpc = configs[j].bpc, scale = configs[j].scale;
+    for (size_t j = 0; j < sizeof(configs) / sizeof(*configs); j++) {
+        const int bpc = configs[j].bpc, scale = configs[j].scale;
 
-            VifPublicState s;
-            if (vif_buffer_alloc(&s.buf, w, h, bpc)) continue;
-            log_generate(s.log2_table);
-            s.vif_enhn_gain_limit = DEFAULT_VIF_ENHN_GAIN_LIMIT;
+        if (!checkasm_check_func(get_vif_statistic_16(checkasm_get_cpu_flags()),
+                                  "vif_statistic_16_%dbpc_scale%d", bpc,
+                                  scale))
+            continue;
 
-            const uint16_t mask = (uint16_t) ((1 << bpc) - 1);
-            uint16_t *ref = s.buf.ref, *dis = s.buf.dis;
-            const ptrdiff_t stride = s.buf.stride / sizeof(uint16_t);
-            for (unsigned r = 0; r < h; r++)
-                for (unsigned c = 0; c < w; c++) {
-                    ref[r * stride + c] =
-                        (uint16_t) checkasm_rand_uint32() & mask;
-                    dis[r * stride + c] =
-                        (uint16_t) checkasm_rand_uint32() & mask;
+        for (int p = 0; p < VIF_N_PATTERNS; p++) {
+            for (size_t i = 0; i < sizeof(sizes) / sizeof(*sizes); i++) {
+                const unsigned w = sizes[i].w, h = sizes[i].h;
+
+                VifPublicState s;
+                if (vif_buffer_alloc(&s.buf, w, h, bpc)) continue;
+                log_generate(s.log2_table);
+
+                fill_vif_planes(s.buf.ref, s.buf.dis,
+                                s.buf.stride / sizeof(uint16_t), w, h, bpc, p);
+                pad_top_and_bottom(s.buf, h, vif_filter1d_width[scale]);
+
+                float num_c = 0, den_c = 0, num_a = 0, den_a = 0;
+                for (size_t g = 0;
+                     g < sizeof(vif_gain_limits) / sizeof(*vif_gain_limits);
+                     g++)
+                {
+                    s.vif_enhn_gain_limit = vif_gain_limits[g];
+                    checkasm_call_ref(&s, &num_c, &den_c, w, h, bpc, scale);
+                    checkasm_call_new(&s, &num_a, &den_a, w, h, bpc, scale);
+
+                    if (num_c != num_a || den_c != den_a) {
+                        if (checkasm_fail())
+                            fprintf(stderr,
+                                    "%s %ux%u bpc=%d scale=%d gain_limit=%g: "
+                                    "expected {%f,%f}, got {%f,%f}\n",
+                                    vif_pattern_names[p], w, h, bpc, scale,
+                                    vif_gain_limits[g], num_c, den_c, num_a,
+                                    den_a);
+                    }
                 }
-            pad_top_and_bottom(s.buf, h, vif_filter1d_width[scale]);
 
-            float num_c = 0, den_c = 0, num_a = 0, den_a = 0;
-            checkasm_call_ref(&s, &num_c, &den_c, w, h, bpc, scale);
-            checkasm_call_new(&s, &num_a, &den_a, w, h, bpc, scale);
+                if (p == VIF_TRACKING &&
+                    i == sizeof(sizes) / sizeof(*sizes) - 1)
+                {
+                    s.vif_enhn_gain_limit = DEFAULT_VIF_ENHN_GAIN_LIMIT;
+                    checkasm_bench_new(&s, &num_a, &den_a, w, h, bpc, scale);
+                }
 
-            if (num_c != num_a || den_c != den_a) {
-                if (checkasm_fail())
-                    fprintf(stderr,
-                            "%ux%u bpc=%d scale=%d: expected {%f,%f}, got "
-                            "{%f,%f}\n",
-                            w, h, bpc, scale, num_c, den_c, num_a, den_a);
+                vif_buffer_free(&s.buf);
             }
-
-            vif_buffer_free(&s.buf);
         }
     }
 }
