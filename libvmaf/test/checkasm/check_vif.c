@@ -341,6 +341,11 @@ static void check_subsample_rd_8(void)
                           (uint16_t *) buf_a.dis, dec_stride, w / 2, h / 2,
                           "decimated_dis");
 
+        // outside of --bench, checkasm_bench_new() makes a checked call,
+        // which cannot pass the VifBuffer by value (see checkasm_call above)
+        if (i == sizeof(sizes) / sizeof(*sizes) - 1 && checkasm_bench_func())
+            checkasm_bench_new(buf_a, w, h);
+
         vif_buffer_free(&buf_c);
         vif_buffer_free(&buf_a);
     }
@@ -403,6 +408,11 @@ static void check_subsample_rd_16(void)
             checkasm_check2d(uint16_t, (uint16_t *) buf_c.dis, dec_stride,
                               (uint16_t *) buf_a.dis, dec_stride, w / 2,
                               h / 2, name);
+
+            // see check_subsample_rd_8()
+            if (i == sizeof(sizes) / sizeof(*sizes) - 1 && scale == 0 &&
+                checkasm_bench_func())
+                checkasm_bench_new(buf_a, w, h, scale, bpc);
 
             vif_buffer_free(&buf_c);
             vif_buffer_free(&buf_a);
