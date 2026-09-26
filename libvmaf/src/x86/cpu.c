@@ -71,6 +71,11 @@ unsigned vmaf_get_cpu_flags_x86(void) {
                             if (X(r.ebx, 0xd0230000) && X(r.ecx, 0x00005f42))
                                 flags |= VMAF_X86_CPU_FLAG_AVX512ICL;
                         }
+                        if (r.eax >= 1) {
+                            vmaf_cpu_cpuid(&r, 7, 1);
+                            if (X(r.eax, 0x00000010)) /* AVX-VNNI */
+                                flags |= VMAF_X86_CPU_FLAG_AVXVNNI;
+                        }
                     }
                 }
             }

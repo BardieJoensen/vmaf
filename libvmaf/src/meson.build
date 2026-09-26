@@ -33,6 +33,7 @@ endif
 is_asm_enabled = get_option('enable_asm') == true
 is_cuda_enabled = get_option('enable_cuda') == true
 is_avx512_enabled = get_option('enable_avx512') == true
+is_avxvnni_supported = false
 is_nvtx_enabled = get_option('enable_nvtx') == true
 
 if is_nvtx_enabled    
@@ -86,6 +87,10 @@ if is_asm_enabled
                 error('unexpected nasm version string: @0@'.format(nasm_r.stdout()))
             endif
         endif
+
+        # vpdpwssd variants of the AVX2 VIF kernels
+        is_avxvnni_supported = cc.has_argument('-mavxvnni')
+        cdata.set10('HAVE_AVXVNNI', is_avxvnni_supported)
 
         # Generate config.asm
         cdata_asm.set10('ARCH_X86_64', host_machine.cpu_family() == 'x86_64')
@@ -304,6 +309,17 @@ if is_asm_enabled
       )
 
       platform_specific_cpu_objects += x86_avx2_static_lib.extract_all_objects(recursive: true)
+
+      if is_avxvnni_supported
+        x86_avxvnni_static_lib = static_library(
+            'x86_avxvnni',
+            [feature_src_dir + 'x86/vif_avxvnni.c'],
+            include_directories : vmaf_base_include,
+            c_args : ['-mavx', '-mavx2', '-mfma', '-mavxvnni'] + vmaf_cflags_common,
+        )
+
+        platform_specific_cpu_objects += x86_avxvnni_static_lib.extract_all_objects(recursive: true)
+      endif
 
       if is_avx512_enabled and is_avx512_supported
         x86_avx512_sources = [

@@ -26,6 +26,28 @@
 #include "feature/common/macros.h"
 #include "mem.h"
 
+/*
+ * This file is also built with -mavxvnni as vif_avxvnni.c, which defines
+ * VIF_AVXVNNI: the kernels are the same, but every vpmaddwd + vpaddd
+ * accumulation is a single vpdpwssd there, and the exported functions get
+ * an _avxvnni suffix instead of _avx2.
+ */
+#ifdef VIF_AVXVNNI
+#define VIF_X86_FN(name) name##_avxvnni
+#else
+#define VIF_X86_FN(name) name##_avx2
+#endif
+
+// acc + the sum of the products of each pair of int16 in a and b
+static FORCE_INLINE __m256i vif_madd_acc(__m256i acc, __m256i a, __m256i b)
+{
+#ifdef VIF_AVXVNNI
+    return _mm256_dpwssd_avx_epi32(acc, a, b);
+#else
+    return _mm256_add_epi32(acc, _mm256_madd_epi16(a, b));
+#endif
+}
+
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
 #define MAX(x, y) (((x) > (y)) ? (x) : (y))
 
@@ -197,12 +219,12 @@ static FORCE_INLINE void vif_hfilt(const int16_t *p, const __m256i *coef,
     __m256i o = _mm256_madd_epi16(
         _mm256_loadu_si256((const __m256i *) (p + first + 1)), coef[0]);
     for (int m = 1; m < npairs; m++) {
-        e = _mm256_add_epi32(e, _mm256_madd_epi16(
+        e = vif_madd_acc(e, 
                 _mm256_loadu_si256((const __m256i *) (p + first + step * m)),
-                coef[m]));
-        o = _mm256_add_epi32(o, _mm256_madd_epi16(
+                coef[m]);
+        o = vif_madd_acc(o, 
                 _mm256_loadu_si256((const __m256i *) (p + first + step * m + 1)),
-                coef[m]));
+                coef[m]);
     }
     *even = e;
     *odd = o;
@@ -403,7 +425,7 @@ static FORCE_INLINE void vif_horizontal_row(const VifPlanes *p, unsigned w,
     *accum = acc_row;
 }
 
-void vif_statistic_8_avx2(struct VifPublicState *s, float *num, float *den, unsigned w, unsigned h) {
+void VIF_X86_FN(vif_statistic_8)(struct VifPublicState *s, float *num, float *den, unsigned w, unsigned h) {
     assert(vif_filter1d_width[0] == 17);
     static const unsigned fwidth = 17;
     const uint16_t *vif_filt_s0 = vif_filter1d_table[0];
@@ -461,10 +483,10 @@ void vif_statistic_8_avx2(struct VifPublicState *s, float *num, float *den, unsi
                 __m256i d0 = _mm256_cvtepu8_epi16(_mm_loadu_si128((__m128i *) (dis + ra)));
                 __m256i d1 = _mm256_cvtepu8_epi16(_mm_loadu_si128((__m128i *) (dis + rb)));
 
-                mu1_lo = _mm256_add_epi32(mu1_lo, _mm256_madd_epi16(_mm256_unpacklo_epi16(r0, r1), f));
-                mu1_hi = _mm256_add_epi32(mu1_hi, _mm256_madd_epi16(_mm256_unpackhi_epi16(r0, r1), f));
-                mu2_lo = _mm256_add_epi32(mu2_lo, _mm256_madd_epi16(_mm256_unpacklo_epi16(d0, d1), f));
-                mu2_hi = _mm256_add_epi32(mu2_hi, _mm256_madd_epi16(_mm256_unpackhi_epi16(d0, d1), f));
+                mu1_lo = vif_madd_acc(mu1_lo, _mm256_unpacklo_epi16(r0, r1), f);
+                mu1_hi = vif_madd_acc(mu1_hi, _mm256_unpackhi_epi16(r0, r1), f);
+                mu2_lo = vif_madd_acc(mu2_lo, _mm256_unpacklo_epi16(d0, d1), f);
+                mu2_hi = vif_madd_acc(mu2_hi, _mm256_unpackhi_epi16(d0, d1), f);
 
                 __m256i rr0 = _mm256_xor_si256(_mm256_mullo_epi16(r0, r0), offset16);
                 __m256i rr1 = _mm256_xor_si256(_mm256_mullo_epi16(r1, r1), offset16);
@@ -473,12 +495,12 @@ void vif_statistic_8_avx2(struct VifPublicState *s, float *num, float *den, unsi
                 __m256i rd0 = _mm256_xor_si256(_mm256_mullo_epi16(r0, d0), offset16);
                 __m256i rd1 = _mm256_xor_si256(_mm256_mullo_epi16(r1, d1), offset16);
 
-                rr_lo = _mm256_add_epi32(rr_lo, _mm256_madd_epi16(_mm256_unpacklo_epi16(rr0, rr1), f));
-                rr_hi = _mm256_add_epi32(rr_hi, _mm256_madd_epi16(_mm256_unpackhi_epi16(rr0, rr1), f));
-                dd_lo = _mm256_add_epi32(dd_lo, _mm256_madd_epi16(_mm256_unpacklo_epi16(dd0, dd1), f));
-                dd_hi = _mm256_add_epi32(dd_hi, _mm256_madd_epi16(_mm256_unpackhi_epi16(dd0, dd1), f));
-                rd_lo = _mm256_add_epi32(rd_lo, _mm256_madd_epi16(_mm256_unpacklo_epi16(rd0, rd1), f));
-                rd_hi = _mm256_add_epi32(rd_hi, _mm256_madd_epi16(_mm256_unpackhi_epi16(rd0, rd1), f));
+                rr_lo = vif_madd_acc(rr_lo, _mm256_unpacklo_epi16(rr0, rr1), f);
+                rr_hi = vif_madd_acc(rr_hi, _mm256_unpackhi_epi16(rr0, rr1), f);
+                dd_lo = vif_madd_acc(dd_lo, _mm256_unpacklo_epi16(dd0, dd1), f);
+                dd_hi = vif_madd_acc(dd_hi, _mm256_unpackhi_epi16(dd0, dd1), f);
+                rd_lo = vif_madd_acc(rd_lo, _mm256_unpacklo_epi16(rd0, rd1), f);
+                rd_hi = vif_madd_acc(rd_hi, _mm256_unpackhi_epi16(rd0, rd1), f);
             }
 
             mu1_lo = _mm256_srai_epi32(_mm256_add_epi32(mu1_lo, mu_round), 8);
@@ -567,10 +589,8 @@ static FORCE_INLINE void vif16_vertical_block(const uint16_t *ref,
 // accumulate row pair (a, b) or the centre row (a, a) with tap pair f
 #define VIF16_PAIR(acc_lo, acc_hi, a, b, f)                                   \
     do {                                                                      \
-        acc_lo = _mm256_add_epi32(acc_lo,                                     \
-                     _mm256_madd_epi16(_mm256_unpacklo_epi16(a, b), f));      \
-        acc_hi = _mm256_add_epi32(acc_hi,                                     \
-                     _mm256_madd_epi16(_mm256_unpackhi_epi16(a, b), f));      \
+        acc_lo = vif_madd_acc(acc_lo, _mm256_unpacklo_epi16(a, b), f);        \
+        acc_hi = vif_madd_acc(acc_hi, _mm256_unpackhi_epi16(a, b), f);        \
     } while (0)
 
 // T = (sum + round) >> shift from the offset hi/lo sums, as uint32
@@ -735,7 +755,7 @@ static FORCE_INLINE void vif_statistic_16_scale(struct VifPublicState *s,
     den[0] = acc.den_log / 2048.0 + acc.den_non_log;
 }
 
-void vif_statistic_16_avx2(struct VifPublicState *s, float *num, float *den, unsigned w, unsigned h, int bpc, int scale) {
+void VIF_X86_FN(vif_statistic_16)(struct VifPublicState *s, float *num, float *den, unsigned w, unsigned h, int bpc, int scale) {
     // hfirst/hstep/hpairs as set up by vif_hcoef() for the scale's filter
     switch (scale) {
     case 0: vif_statistic_16_scale(s, num, den, w, h, bpc, 0, -8, 2, 9); break;
@@ -753,9 +773,9 @@ static FORCE_INLINE __m256i vif_hfilt_even(const int16_t *p, const __m256i *coef
     __m256i e = _mm256_madd_epi16(
         _mm256_loadu_si256((const __m256i *) (p + first)), coef[0]);
     for (int m = 1; m < npairs; m++)
-        e = _mm256_add_epi32(e, _mm256_madd_epi16(
+        e = vif_madd_acc(e, 
                 _mm256_loadu_si256((const __m256i *) (p + first + step * m)),
-                coef[m]));
+                coef[m]);
     return e;
 }
 
@@ -800,7 +820,7 @@ static FORCE_INLINE void vif_subsample_horizontal(const int16_t *p, uint16_t *ds
  * computes the even columns that the decimation keeps. The results are
  * written decimated into mu1/mu2 and copied into ref/dis as before.
  */
-void vif_subsample_rd_8_avx2(VifBuffer buf, unsigned w, unsigned h) {
+void VIF_X86_FN(vif_subsample_rd_8)(VifBuffer buf, unsigned w, unsigned h) {
     const unsigned fwidth = vif_filter1d_width[1];
     const uint16_t *vif_filt_s1 = vif_filter1d_table[1];
     const int fh = fwidth / 2;
@@ -840,10 +860,10 @@ void vif_subsample_rd_8_avx2(VifBuffer buf, unsigned w, unsigned h) {
                 const __m256i r1 = _mm256_cvtepu8_epi16(_mm_loadu_si128((__m128i *) (ref + rb + j)));
                 const __m256i d0 = _mm256_cvtepu8_epi16(_mm_loadu_si128((__m128i *) (dis + ra + j)));
                 const __m256i d1 = _mm256_cvtepu8_epi16(_mm_loadu_si128((__m128i *) (dis + rb + j)));
-                r_lo = _mm256_add_epi32(r_lo, _mm256_madd_epi16(_mm256_unpacklo_epi16(r0, r1), vcoef[k]));
-                r_hi = _mm256_add_epi32(r_hi, _mm256_madd_epi16(_mm256_unpackhi_epi16(r0, r1), vcoef[k]));
-                d_lo = _mm256_add_epi32(d_lo, _mm256_madd_epi16(_mm256_unpacklo_epi16(d0, d1), vcoef[k]));
-                d_hi = _mm256_add_epi32(d_hi, _mm256_madd_epi16(_mm256_unpackhi_epi16(d0, d1), vcoef[k]));
+                r_lo = vif_madd_acc(r_lo, _mm256_unpacklo_epi16(r0, r1), vcoef[k]);
+                r_hi = vif_madd_acc(r_hi, _mm256_unpackhi_epi16(r0, r1), vcoef[k]);
+                d_lo = vif_madd_acc(d_lo, _mm256_unpacklo_epi16(d0, d1), vcoef[k]);
+                d_hi = vif_madd_acc(d_hi, _mm256_unpackhi_epi16(d0, d1), vcoef[k]);
             }
             _mm256_storeu_si256((__m256i *) (pr + j), _mm256_packs_epi32(
                 _mm256_srai_epi32(_mm256_add_epi32(r_lo, mu_round), 8),
@@ -929,10 +949,10 @@ static FORCE_INLINE void vif_subsample_rd_16_scale(VifBuffer buf, unsigned w,
                 const __m256i r1 = _mm256_xor_si256(_mm256_loadu_si256((const __m256i *) (ref + stride * (fh - k) + j)), offset16);
                 const __m256i d0 = _mm256_xor_si256(_mm256_loadu_si256((const __m256i *) (dis + stride * (k - fh) + j)), offset16);
                 const __m256i d1 = _mm256_xor_si256(_mm256_loadu_si256((const __m256i *) (dis + stride * (fh - k) + j)), offset16);
-                r_lo = _mm256_add_epi32(r_lo, _mm256_madd_epi16(_mm256_unpacklo_epi16(r0, r1), vcoef[k]));
-                r_hi = _mm256_add_epi32(r_hi, _mm256_madd_epi16(_mm256_unpackhi_epi16(r0, r1), vcoef[k]));
-                d_lo = _mm256_add_epi32(d_lo, _mm256_madd_epi16(_mm256_unpacklo_epi16(d0, d1), vcoef[k]));
-                d_hi = _mm256_add_epi32(d_hi, _mm256_madd_epi16(_mm256_unpackhi_epi16(d0, d1), vcoef[k]));
+                r_lo = vif_madd_acc(r_lo, _mm256_unpacklo_epi16(r0, r1), vcoef[k]);
+                r_hi = vif_madd_acc(r_hi, _mm256_unpackhi_epi16(r0, r1), vcoef[k]);
+                d_lo = vif_madd_acc(d_lo, _mm256_unpacklo_epi16(d0, d1), vcoef[k]);
+                d_hi = vif_madd_acc(d_hi, _mm256_unpackhi_epi16(d0, d1), vcoef[k]);
             }
             // mu = (uint16_t)((sum + round) >> shift), stored minus 32768
 #define VIF_SUB16_MU(acc)                                                     \
@@ -969,7 +989,7 @@ static FORCE_INLINE void vif_subsample_rd_16_scale(VifBuffer buf, unsigned w,
     copy_and_pad(buf, w, h, scale);
 }
 
-void vif_subsample_rd_16_avx2(VifBuffer buf, unsigned w, unsigned h, int scale,
+void VIF_X86_FN(vif_subsample_rd_16)(VifBuffer buf, unsigned w, unsigned h, int scale,
                               int bpc) {
     // filter scale + 1; hfirst/hstep/hpairs as set up by vif_hcoef()
     switch (scale) {

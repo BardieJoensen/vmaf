@@ -35,6 +35,9 @@
 
 #if ARCH_X86
 #include "x86/vif_avx2.h"
+#if HAVE_AVXVNNI
+#include "x86/vif_avxvnni.h"
+#endif
 #if HAVE_AVX512
 #include "x86/vif_avx512.h"
 #endif
@@ -648,6 +651,14 @@ static int init(VmafFeatureExtractor *fex, enum VmafPixelFormat pix_fmt,
         s->vif_statistic_8 = vif_statistic_8_avx2;
         s->vif_statistic_16 = vif_statistic_16_avx2;
     }
+#if HAVE_AVXVNNI
+    if (flags & VMAF_X86_CPU_FLAG_AVXVNNI) {
+        s->subsample_rd_8 = vif_subsample_rd_8_avxvnni;
+        s->subsample_rd_16 = vif_subsample_rd_16_avxvnni;
+        s->vif_statistic_8 = vif_statistic_8_avxvnni;
+        s->vif_statistic_16 = vif_statistic_16_avxvnni;
+    }
+#endif
 #if HAVE_AVX512
     if (flags & VMAF_X86_CPU_FLAG_AVX512) {
         s->subsample_rd_8 = vif_subsample_rd_8_avx512;

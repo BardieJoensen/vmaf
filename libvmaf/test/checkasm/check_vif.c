@@ -31,6 +31,9 @@
 
 #if ARCH_X86
 #include "feature/x86/vif_avx2.h"
+#if HAVE_AVXVNNI
+#include "feature/x86/vif_avxvnni.h"
+#endif
 #if HAVE_AVX512
 #include "feature/x86/vif_avx512.h"
 #endif
@@ -55,6 +58,10 @@ static vif_statistic_8_fn get_vif_statistic_8(unsigned cpu_flags)
 #if ARCH_X86
     if (cpu_flags & VMAF_X86_CPU_FLAG_AVX2)
         fn = vif_statistic_8_avx2;
+#if HAVE_AVXVNNI
+    if (cpu_flags & VMAF_X86_CPU_FLAG_AVXVNNI)
+        fn = vif_statistic_8_avxvnni;
+#endif
 #if HAVE_AVX512
     if (cpu_flags & VMAF_X86_CPU_FLAG_AVX512)
         fn = vif_statistic_8_avx512;
@@ -72,6 +79,10 @@ static vif_statistic_16_fn get_vif_statistic_16(unsigned cpu_flags)
 #if ARCH_X86
     if (cpu_flags & VMAF_X86_CPU_FLAG_AVX2)
         fn = vif_statistic_16_avx2;
+#if HAVE_AVXVNNI
+    if (cpu_flags & VMAF_X86_CPU_FLAG_AVXVNNI)
+        fn = vif_statistic_16_avxvnni;
+#endif
 #if HAVE_AVX512
     if (cpu_flags & VMAF_X86_CPU_FLAG_AVX512)
         fn = vif_statistic_16_avx512;
@@ -89,6 +100,10 @@ static subsample_rd_8_fn get_subsample_rd_8(unsigned cpu_flags)
 #if ARCH_X86
     if (cpu_flags & VMAF_X86_CPU_FLAG_AVX2)
         fn = vif_subsample_rd_8_avx2;
+#if HAVE_AVXVNNI
+    if (cpu_flags & VMAF_X86_CPU_FLAG_AVXVNNI)
+        fn = vif_subsample_rd_8_avxvnni;
+#endif
 #if HAVE_AVX512
     if (cpu_flags & VMAF_X86_CPU_FLAG_AVX512)
         fn = vif_subsample_rd_8_avx512;
@@ -106,6 +121,10 @@ static subsample_rd_16_fn get_subsample_rd_16(unsigned cpu_flags)
 #if ARCH_X86
     if (cpu_flags & VMAF_X86_CPU_FLAG_AVX2)
         fn = vif_subsample_rd_16_avx2;
+#if HAVE_AVXVNNI
+    if (cpu_flags & VMAF_X86_CPU_FLAG_AVXVNNI)
+        fn = vif_subsample_rd_16_avxvnni;
+#endif
 #if HAVE_AVX512
     if (cpu_flags & VMAF_X86_CPU_FLAG_AVX512)
         fn = vif_subsample_rd_16_avx512;

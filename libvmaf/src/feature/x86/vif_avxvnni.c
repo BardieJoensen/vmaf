@@ -1,6 +1,6 @@
 /**
  *
- *  Copyright 2016-2020 Netflix, Inc.
+ *  Copyright 2026 Bardie Høgh Joensen
  *
  *     Licensed under the BSD+Patent License (the "License");
  *     you may not use this file except in compliance with the License.
@@ -16,19 +16,9 @@
  *
  */
 
-#ifndef __VMAF_SRC_X86_CPU_H__
-#define __VMAF_SRC_X86_CPU_H__
-
-enum VmafCpuFlags {
-    VMAF_X86_CPU_FLAG_SSE2 = 1 << 0,
-    VMAF_X86_CPU_FLAG_SSSE3 = 1 << 1,
-    VMAF_X86_CPU_FLAG_SSE41 = 1 << 2,
-    VMAF_X86_CPU_FLAG_AVX2 = 1 << 3,
-    VMAF_X86_CPU_FLAG_AVX512 = 1 << 4,
-    VMAF_X86_CPU_FLAG_AVX512ICL = 1 << 5,
-    VMAF_X86_CPU_FLAG_AVXVNNI = 1 << 6,
-};
-
-unsigned vmaf_get_cpu_flags_x86(void);
-
-#endif /* __VMAF_SRC_X86_CPU_H__ */
+/*
+ * The AVX2 VIF kernels, built with -mavxvnni: every vpmaddwd + vpaddd
+ * accumulation becomes a single vpdpwssd (see vif_madd_acc()).
+ */
+#define VIF_AVXVNNI 1
+#include "vif_avx2.c"

@@ -40,6 +40,9 @@ static const CheckasmTest tests[] = {
 static const CheckasmCpuInfo cpu_flags[] = {
 #if ARCH_X86
     { "AVX2",   "avx2",   VMAF_X86_CPU_FLAG_AVX2,   0 },
+#if HAVE_AVXVNNI
+    { "AVX-VNNI", "avxvnni", VMAF_X86_CPU_FLAG_AVXVNNI, 0 },
+#endif
 #if HAVE_AVX512
     { "AVX512", "avx512", VMAF_X86_CPU_FLAG_AVX512, 0 },
 #endif
