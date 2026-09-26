@@ -328,9 +328,10 @@ static void fill_band_i32(int32_t *band, int rows, int stride)
                 (int32_t) ((checkasm_rand_uint32() % 16001) - 8000);
 }
 
-// Scale 1-3 bands grow with every scale: spread the magnitudes over
-// 0..2^23 so that each vector mixes samples below and above 32768, where
-// adm_decouple_s123() switches to get_best15_from32().
+// Scale 1-3 bands are large: 1080p film reaches about 2^29 at scale 1.
+// Spread the magnitudes over 0..2^30 so that each vector mixes samples
+// below and above 32768, where adm_decouple_s123() switches to
+// get_best15_from32(), and squared magnitudes beyond 2^53.
 static void fill_band_i32_wide(int32_t *band, int rows, int stride)
 {
     if (!band) return;
@@ -338,7 +339,7 @@ static void fill_band_i32_wide(int32_t *band, int rows, int stride)
         for (int j = 0; j < stride; j++) {
             const uint32_t r = checkasm_rand_uint32();
             const int32_t v = (int32_t) (checkasm_rand_uint32() &
-                                         ((2u << (r % 23)) - 1));
+                                         ((2u << (r % 30)) - 1));
             band[i * stride + j] = (r & 0x80000000u) ? -v : v;
         }
 }
@@ -354,8 +355,8 @@ static void fill_band_i32_tracking(int32_t *dis, const int32_t *ref, int rows,
         case 0: break;
         case 1: v += (int64_t) ((r >> 8) % 7) - 3; break;
         case 2: v = v * (int64_t) (60 + (r >> 8) % 14) / 64; break;
-        case 3: v = (int64_t) (checkasm_rand_uint32() & ((1u << 23) - 1)) -
-                    (1 << 22); break;
+        case 3: v = (int64_t) (checkasm_rand_uint32() & ((1u << 30) - 1)) -
+                    (1 << 29); break;
         }
         dis[i] = (int32_t) v;
     }
