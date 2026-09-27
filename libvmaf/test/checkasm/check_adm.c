@@ -377,10 +377,31 @@ static void check2d_band_i32(const int32_t *a, const int32_t *b, int cols,
 }
 
 static const struct { int w, h; } dwt2_sizes[] = {
+    // Coarse pyramid levels still need both edges reflected correctly.
+    { 1, 1 },
+    { 2, 2 },
+    { 3, 3 },
+    { 4, 4 },
+    { 5, 5 },
     { 16, 16 },
-    { 32, 24 },
-    { 64, 48 },
     { 20, 18 },
+    // Horizontal DWT taps at 2*j-1..2*j+2 must fit before vectorizing.
+    // Cover the mirrored edge and the first full block at each boundary.
+    { 31, 35 },
+    { 32, 24 },
+    { 33, 35 },
+    { 34, 35 },
+    { 35, 35 },
+    { 63, 49 },
+    { 64, 48 },
+    { 65, 49 },
+    { 66, 49 },
+    { 67, 49 },
+    { 127, 35 },
+    { 128, 35 },
+    { 129, 35 },
+    { 130, 35 },
+    { 131, 35 },
 };
 
 static void check_adm_dwt2(void)
@@ -424,37 +445,51 @@ static void check_adm_dwt2(void)
             free(src);
         }
 
-        {
-            checkasm_declare(void, const uint8_t *, const adm_dwt_band_t *,
-                              AdmBuffer *, int, int, int, int, int);
-            uint16_t *src = malloc((size_t) h * w * sizeof(uint16_t));
-            for (int i2 = 0; i2 < h * w; i2++)
-                src[i2] = (uint16_t) checkasm_rand_uint32() & 0x3ff;
+        static const int bitdepths[] = { 10, 12, 16 };
+        for (size_t b = 0; b < sizeof(bitdepths) / sizeof(*bitdepths); b++) {
+            const int bpc = bitdepths[b];
+            const uint16_t max = (1u << bpc) - 1;
+            for (int padded = 0; padded < 2; padded++) {
+                // Strides are in uint16_t samples, not bytes.
+                const int src_stride = w + (padded ? 7 : 0);
+                checkasm_declare(void, const uint16_t *, const adm_dwt_band_t *,
+                                  AdmBuffer *, int, int, int, int, int);
+                uint16_t *src = malloc((size_t) h * src_stride * sizeof(*src));
+                if (checkasm_check_func(get_dwt2_16(checkasm_get_cpu_flags()),
+                                         "adm_dwt2_16_%dx%d_%dbpc_stride%d",
+                                         w, h, bpc, src_stride))
+                {
+                    if (!src) {
+                        checkasm_fail();
+                        continue;
+                    }
+                    for (int pattern = 0; pattern < 2; pattern++) {
+                        for (int r = 0; r < h; r++)
+                            for (int c = 0; c < src_stride; c++)
+                                src[r * src_stride + c] = pattern ?
+                                    (((r ^ c) & 1) ? max : 0) :
+                                    (checkasm_rand_uint32() & max);
 
-            if (checkasm_check_func(get_dwt2_16(checkasm_get_cpu_flags()),
-                                     "adm_dwt2_16_%dx%d", w, h))
-            {
-                checkasm_call_ref((const uint8_t *) src, &buf.ref_dwt2, &buf,
-                                   w, h, w * (int) sizeof(uint16_t),
-                                   dst_stride, 10);
-                checkasm_call_new((const uint8_t *) src, &buf.dis_dwt2, &buf,
-                                   w, h, w * (int) sizeof(uint16_t),
-                                   dst_stride, 10);
+                        checkasm_call_ref(src, &buf.ref_dwt2, &buf, w, h,
+                                           src_stride, dst_stride, bpc);
+                        checkasm_call_new(src, &buf.dis_dwt2, &buf, w, h,
+                                           src_stride, dst_stride, bpc);
 
-                check2d_band(buf.ref_dwt2.band_a, buf.dis_dwt2.band_a,
-                             w_half, h_half, dst_stride, "band_a");
-                check2d_band(buf.ref_dwt2.band_h, buf.dis_dwt2.band_h,
-                             w_half, h_half, dst_stride, "band_h");
-                check2d_band(buf.ref_dwt2.band_v, buf.dis_dwt2.band_v,
-                             w_half, h_half, dst_stride, "band_v");
-                check2d_band(buf.ref_dwt2.band_d, buf.dis_dwt2.band_d,
-                             w_half, h_half, dst_stride, "band_d");
+                        check2d_band(buf.ref_dwt2.band_a, buf.dis_dwt2.band_a,
+                                     w_half, h_half, dst_stride, "band_a");
+                        check2d_band(buf.ref_dwt2.band_h, buf.dis_dwt2.band_h,
+                                     w_half, h_half, dst_stride, "band_h");
+                        check2d_band(buf.ref_dwt2.band_v, buf.dis_dwt2.band_v,
+                                     w_half, h_half, dst_stride, "band_v");
+                        check2d_band(buf.ref_dwt2.band_d, buf.dis_dwt2.band_d,
+                                     w_half, h_half, dst_stride, "band_d");
+                    }
 
-                checkasm_bench_new((const uint8_t *) src, &buf.dis_dwt2, &buf,
-                                    w, h, w * (int) sizeof(uint16_t),
-                                    dst_stride, 10);
+                    checkasm_bench_new(src, &buf.dis_dwt2, &buf, w, h,
+                                        src_stride, dst_stride, bpc);
+                }
+                free(src);
             }
-            free(src);
         }
 
         adm_buffer_free(&buf);
@@ -644,11 +679,9 @@ static void check_adm_cm(void)
         const int h_half = (h + 1) / 2;
         const int w_half = (w + 1) / 2;
 
-        adm_dwt_band_t *c_bands[4] = { &buf_c.decouple_r, &buf_c.decouple_a,
-                                        &buf_c.csf_f, &buf_c.csf_a };
-        adm_dwt_band_t *a_bands[4] = { &buf_a.decouple_r, &buf_a.decouple_a,
-                                        &buf_a.csf_f, &buf_a.csf_a };
-        for (int b = 0; b < 4; b++) {
+        adm_dwt_band_t *c_bands[2] = { &buf_c.decouple_r, &buf_c.decouple_a };
+        adm_dwt_band_t *a_bands[2] = { &buf_a.decouple_r, &buf_a.decouple_a };
+        for (int b = 0; b < 2; b++) {
             fill_band(c_bands[b]->band_h, h_half, stride);
             fill_band(c_bands[b]->band_v, h_half, stride);
             fill_band(c_bands[b]->band_d, h_half, stride);
@@ -664,6 +697,19 @@ static void check_adm_cm(void)
             if (checkasm_check_func(get_cm(checkasm_get_cpu_flags()),
                                      "adm_cm_%dx%d_aim%d", w, h, aim))
             {
+                // CM requires the nonnegative filtered magnitudes produced by
+                // CSF. Generate identical valid inputs for both implementations.
+                adm_csf(&buf_c, w_half, h_half, stride,
+                        DEFAULT_ADM_NORM_VIEW_DIST,
+                        DEFAULT_ADM_REF_DISPLAY_HEIGHT, DEFAULT_ADM_CSF_MODE,
+                        DEFAULT_ADM_CSF_SCALE, DEFAULT_ADM_CSF_DIAG_SCALE,
+                        (bool) aim);
+                adm_csf(&buf_a, w_half, h_half, stride,
+                        DEFAULT_ADM_NORM_VIEW_DIST,
+                        DEFAULT_ADM_REF_DISPLAY_HEIGHT, DEFAULT_ADM_CSF_MODE,
+                        DEFAULT_ADM_CSF_SCALE, DEFAULT_ADM_CSF_DIAG_SCALE,
+                        (bool) aim);
+
                 const float ref = checkasm_call_ref(
                     &buf_c, w_half, h_half, stride, stride,
                     DEFAULT_ADM_NORM_VIEW_DIST,
@@ -678,7 +724,7 @@ static void check_adm_cm(void)
                     DEFAULT_ADM_NOISE_WEIGHT, (bool) aim);
 
                 const float tol = 1e-4f * (fabsf(ref) + 1.0f);
-                if (fabsf(ref - new) > tol) {
+                if (!isfinite(ref) || !isfinite(new) || fabsf(ref - new) > tol) {
                     if (checkasm_fail())
                         fprintf(stderr, "expected %f, got %f\n", ref, new);
                 }
@@ -700,10 +746,10 @@ static void check_adm_cm(void)
 
 static void check_adm_dwt2_s123(void)
 {
-    for (size_t i = 0; i < sizeof(post_dwt_sizes) / sizeof(*post_dwt_sizes);
+    for (size_t i = 0; i < sizeof(dwt2_sizes) / sizeof(*dwt2_sizes);
          i++)
     {
-        const int w = post_dwt_sizes[i].w, h = post_dwt_sizes[i].h;
+        const int w = dwt2_sizes[i].w, h = dwt2_sizes[i].h;
 
         AdmBuffer buf_c, buf_a;
         if (adm_buffer_alloc(&buf_c, w, h)) continue;
@@ -716,13 +762,16 @@ static void check_adm_dwt2_s123(void)
         const int stride = (int) (buf_c.ind_size_x >> 2);
         const int w_half = (w + 1) / 2, h_half = (h + 1) / 2;
 
-        int32_t *i4_ref = malloc((size_t) h * stride * sizeof(int32_t));
-        int32_t *i4_dis = malloc((size_t) h * stride * sizeof(int32_t));
+        // These are full-width source planes; stride above is for the
+        // half-width output bands and may be smaller than w.
+        const int src_stride = w + 7;
+        int32_t *i4_ref = malloc((size_t) h * src_stride * sizeof(int32_t));
+        int32_t *i4_dis = malloc((size_t) h * src_stride * sizeof(int32_t));
         for (int r = 0; r < h; r++) {
-            for (int c = 0; c < stride; c++) {
-                i4_ref[r * stride + c] =
+            for (int c = 0; c < src_stride; c++) {
+                i4_ref[r * src_stride + c] =
                     (int32_t) ((checkasm_rand_uint32() % 16001) - 8000);
-                i4_dis[r * stride + c] =
+                i4_dis[r * src_stride + c] =
                     (int32_t) ((checkasm_rand_uint32() % 16001) - 8000);
             }
         }
@@ -735,10 +784,10 @@ static void check_adm_dwt2_s123(void)
                     get_dwt2_s123_combined(checkasm_get_cpu_flags()),
                     "adm_dwt2_s123_%dx%d_scale%d", w, h, scale))
             {
-                checkasm_call_ref(i4_ref, i4_dis, &buf_c, w, h, stride,
-                                   stride, stride, scale);
-                checkasm_call_new(i4_ref, i4_dis, &buf_a, w, h, stride,
-                                   stride, stride, scale);
+                checkasm_call_ref(i4_ref, i4_dis, &buf_c, w, h, src_stride,
+                                   src_stride, stride, scale);
+                checkasm_call_new(i4_ref, i4_dis, &buf_a, w, h, src_stride,
+                                   src_stride, stride, scale);
 
                 check2d_band_i32(buf_c.i4_ref_dwt2.band_a,
                                  buf_a.i4_ref_dwt2.band_a, w_half, h_half,
@@ -765,8 +814,8 @@ static void check_adm_dwt2_s123(void)
                                  buf_a.i4_dis_dwt2.band_d, w_half, h_half,
                                  stride, "i4_dis_dwt2.band_d");
 
-                checkasm_bench_new(i4_ref, i4_dis, &buf_a, w, h, stride,
-                                    stride, stride, scale);
+                checkasm_bench_new(i4_ref, i4_dis, &buf_a, w, h, src_stride,
+                                    src_stride, stride, scale);
             }
         }
 
@@ -904,7 +953,7 @@ static void check_adm_csf_den(void)
                     DEFAULT_ADM_NOISE_WEIGHT);
 
                 const float tol = 1e-4f * (fabsf(ref) + 1.0f);
-                if (fabsf(ref - new) > tol) {
+                if (!isfinite(ref) || !isfinite(new) || fabsf(ref - new) > tol) {
                     if (checkasm_fail())
                         fprintf(stderr, "expected %f, got %f\n", ref, new);
                 }
@@ -941,7 +990,7 @@ static void check_adm_csf_den(void)
                     DEFAULT_ADM_NOISE_WEIGHT);
 
                 const float tol = 1e-4f * (fabsf(ref) + 1.0f);
-                if (fabsf(ref - new) > tol) {
+                if (!isfinite(ref) || !isfinite(new) || fabsf(ref - new) > tol) {
                     if (checkasm_fail())
                         fprintf(stderr, "expected %f, got %f\n", ref, new);
                 }
@@ -1111,7 +1160,7 @@ static void check_adm_i4_cm(void)
                         DEFAULT_ADM_NOISE_WEIGHT, (bool) aim);
 
                     const float tol = 1e-4f * (fabsf(ref) + 1.0f);
-                    if (fabsf(ref - new) > tol) {
+                    if (!isfinite(ref) || !isfinite(new) || fabsf(ref - new) > tol) {
                         if (checkasm_fail())
                             fprintf(stderr, "expected %f, got %f\n", ref,
                                     new);

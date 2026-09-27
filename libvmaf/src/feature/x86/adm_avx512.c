@@ -1661,14 +1661,16 @@ float adm_cm_avx512(AdmBuffer *buf, int w, int h, int src_stride, int csf_a_stri
     const int32_t add_shift_xvsq = 268435456;
     const int32_t add_shift_xdsq = 536870912;
 
-    const uint32_t shift_xhcub = (uint32_t)ceil(log2(w) - 4);
-    const uint32_t add_shift_xhcub = (uint32_t)pow(2, (shift_xhcub - 1));
+    // Small images need no downshift. Avoid negative shifts and unsigned
+    // underflow in the rounding term when the shift is zero.
+    const uint32_t shift_xhcub = (uint32_t)MAX(ceil(log2(w) - 4), 0);
+    const uint32_t add_shift_xhcub = shift_xhcub ? 1u << (shift_xhcub - 1) : 0;
 
-    const uint32_t shift_xvcub = (uint32_t)ceil(log2(w) - 4);
-    const uint32_t add_shift_xvcub = (uint32_t)pow(2, (shift_xvcub - 1));
+    const uint32_t shift_xvcub = shift_xhcub;
+    const uint32_t add_shift_xvcub = add_shift_xhcub;
 
-    const uint32_t shift_xdcub = (uint32_t)ceil(log2(w) - 3);
-    const uint32_t add_shift_xdcub = (uint32_t)pow(2, (shift_xdcub - 1));
+    const uint32_t shift_xdcub = (uint32_t)MAX(ceil(log2(w) - 3), 0);
+    const uint32_t add_shift_xdcub = shift_xdcub ? 1u << (shift_xdcub - 1) : 0;
 
     const uint32_t shift_inner_accum = (uint32_t)ceil(log2(h));
     const uint32_t add_shift_inner_accum = (uint32_t)pow(2, (shift_inner_accum - 1));
@@ -2997,18 +2999,16 @@ void adm_dwt2_16_avx512(const uint16_t *src, const adm_dwt_band_t *dst, AdmBuffe
     int16_t *tmphi = tmplo + w;
     int32_t accum;
 
-    __m512i f01_lo = _mm512_set1_epi32(filter_lo[0] + (uint32_t)(filter_lo[1] << 16) /* + (1 << 16) */);
-    __m512i f23_lo = _mm512_set1_epi32(filter_lo[2] + (uint32_t)(filter_lo[3] << 16) /* + (1 << 16) */);
-    __m512i f01_hi = _mm512_set1_epi32(filter_hi[0] + (uint32_t)(filter_hi[1] << 16) + (1 << 16));
-    __m512i f23_hi = _mm512_set1_epi32(filter_hi[2] + (uint32_t)(filter_hi[3] << 16) /*+ (1 << 16)*/);
+    __m512i f01_lo = _mm512_set1_epi32((uint16_t)filter_lo[0] | ((uint32_t)(uint16_t)filter_lo[1] << 16));
+    __m512i f23_lo = _mm512_set1_epi32((uint16_t)filter_lo[2] | ((uint32_t)(uint16_t)filter_lo[3] << 16));
+    __m512i f01_hi = _mm512_set1_epi32((uint16_t)filter_hi[0] | ((uint32_t)(uint16_t)filter_hi[1] << 16));
+    __m512i f23_hi = _mm512_set1_epi32((uint16_t)filter_hi[2] | ((uint32_t)(uint16_t)filter_hi[3] << 16));
 
     __m512i accum0, accum0_lo, accum0_hi;
     //__m512i norm_lo = _mm512_set1_epi32((int32_t)dwt2_db2_coeffs_lo_sum * add_shift_VP);
     //__m512i norm_hi = _mm512_set1_epi32((int32_t)dwt2_db2_coeffs_hi_sum * add_shift_VP);
 
     //int w_mod32 = (w  - (w  % 32));
-    int half_w_mod64 = ((w + 1) / 2) - ((((w + 1) / 2) - 1) % 64);
-
     for (int i = 0; i < (h + 1) / 2; ++i) {
         /* Vertical pass. */
 	    /*
@@ -3064,31 +3064,19 @@ void adm_dwt2_16_avx512(const uint16_t *src, const adm_dwt_band_t *dst, AdmBuffe
 	*/
 
         for (int j = 0; j < w; ++j) {
-            uint16_t u_s0 = src[ind_y[0][i] * src_stride + j];
-            uint16_t u_s1 = src[ind_y[1][i] * src_stride + j];
-            uint16_t u_s2 = src[ind_y[2][i] * src_stride + j];
-            uint16_t u_s3 = src[ind_y[3][i] * src_stride + j];
+            // Center before filtering so even 16-bit inputs fit in int32.
+            // Each filter's sum of absolute coefficients is 54822.
+            const int32_t s0 = src[ind_y[0][i] * src_stride + j] - add_shift_VP;
+            const int32_t s1 = src[ind_y[1][i] * src_stride + j] - add_shift_VP;
+            const int32_t s2 = src[ind_y[2][i] * src_stride + j] - add_shift_VP;
+            const int32_t s3 = src[ind_y[3][i] * src_stride + j] - add_shift_VP;
 
-            accum = 0;
-            accum += (int32_t)filter_lo[0] * (int32_t)u_s0;
-            accum += (int32_t)filter_lo[1] * (int32_t)u_s1;
-            accum += (int32_t)filter_lo[2] * (int32_t)u_s2;
-            accum += (int32_t)filter_lo[3] * (int32_t)u_s3;
-
-            /* normalizing is done for range from(0 to N) to (-N/2 to N/2) */
-            accum -= (int32_t)dwt2_db2_coeffs_lo_sum * add_shift_VP;
-
+            accum = filter_lo[0] * s0 + filter_lo[1] * s1 +
+                    filter_lo[2] * s2 + filter_lo[3] * s3;
             tmplo[j] = (accum + add_shift_VP) >> shift_VP;
 
-            accum = 0;
-            accum += (int32_t)filter_hi[0] * (int32_t)u_s0;
-            accum += (int32_t)filter_hi[1] * (int32_t)u_s1;
-            accum += (int32_t)filter_hi[2] * (int32_t)u_s2;
-            accum += (int32_t)filter_hi[3] * (int32_t)u_s3;
-
-            /* normalizing is done for range from(0 to N) to (-N/2 to N/2) */
-            accum -= (int32_t)dwt2_db2_coeffs_hi_sum * add_shift_VP;
-
+            accum = filter_hi[0] * s0 + filter_hi[1] * s1 +
+                    filter_hi[2] * s2 + filter_hi[3] * s3;
             tmphi[j] = (accum + add_shift_VP) >> shift_VP;
         }
 
@@ -3138,7 +3126,10 @@ void adm_dwt2_16_avx512(const uint16_t *src, const adm_dwt_band_t *dst, AdmBuffe
             dst->band_d[i * dst_stride + j] = (accum + add_shift_HP) >> shift_HP;
         }
 
-        for (int j = 1; j < half_w_mod64; j += 32) {
+        // Taps at 2*j-1..2*j+2 must fit for every output in the block.
+        // Leave outputs requiring right-edge mirroring to the scalar tail.
+        int j = 1;
+        for (; j + 32 <= (w - 1) / 2; j += 32) {
             int j0 = ind_x[0][j];
             int j2 = ind_x[2][j];
             int j16 = ind_x[0][j + 16];
@@ -3217,7 +3208,7 @@ void adm_dwt2_16_avx512(const uint16_t *src, const adm_dwt_band_t *dst, AdmBuffe
             _mm512_storeu_si512((__m512i*)(dst->band_d + i * dst_stride + j), accum0);
         }
 
-        for (int j = half_w_mod64; j < (w + 1) / 2; ++j) {
+        for (; j < (w + 1) / 2; ++j) {
             int j0 = ind_x[0][j];
             int j1 = ind_x[1][j];
             int j2 = ind_x[2][j];
@@ -3297,7 +3288,6 @@ void adm_dwt2_8_avx512(const uint8_t *src, const adm_dwt_band_t *dst,
     __m512i add_shift_HP_vex = _mm512_set1_epi32(32768);
 
     int w_mod_32 = (w >> 5) << 5;
-    int half_w_mod_32 = ((w + 1) / 2) - ((((w + 1) / 2) - 1) % 32);
 
     for (int i = 0; i < (h + 1) / 2; ++i) {
         /* Vertical pass. */
@@ -3441,7 +3431,10 @@ void adm_dwt2_8_avx512(const uint8_t *src, const adm_dwt_band_t *dst,
         accum += (int32_t)filter_hi[3] * s3;
         dst->band_d[i * dst_stride] = (accum + add_shift_HP) >> shift_HP;
 
-        for (int j = 1; j < half_w_mod_32; j = j + 32) {
+        // Taps at 2*j-1..2*j+2 must fit for every output in the block.
+        // Leave outputs requiring right-edge mirroring to the scalar tail.
+        int j = 1;
+        for (; j + 32 <= (w - 1) / 2; j += 32) {
             {
                 __m512i accum_mu2_lo, accum_mu2_hi, accum_mu1_lo, accum_mu1_hi;
                 accum_mu2_lo = accum_mu2_hi = accum_mu1_lo = accum_mu1_hi =
@@ -3551,7 +3544,7 @@ void adm_dwt2_8_avx512(const uint8_t *src, const adm_dwt_band_t *dst,
             }
         }
 
-        for (int j = half_w_mod_32; j < (w + 1) / 2; ++j) {
+        for (; j < (w + 1) / 2; ++j) {
             int j0 = ind_x[0][j];
             int j1 = ind_x[1][j];
             int j2 = ind_x[2][j];
