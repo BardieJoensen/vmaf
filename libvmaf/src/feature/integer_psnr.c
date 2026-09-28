@@ -227,11 +227,12 @@ static int flush(VmafFeatureExtractor *fex,
                  VmafFeatureCollector *feature_collector)
 {
     PsnrState *s = fex->priv;
+    const unsigned n = s->enable_chroma ? 3 : 1;
     const char *apsnr_name[3] = { "apsnr_y", "apsnr_cb", "apsnr_cr" };
 
     int err = 0;
     if (s->enable_apsnr) {
-        for (unsigned i = 0; i < 3; i++) {
+        for (unsigned i = 0; i < n; i++) {
 
             double apsnr = 10 * (log10(s->peak * s->peak) +
                                  log10(s->apsnr.n_pixels[i]) -

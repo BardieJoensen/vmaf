@@ -48,6 +48,65 @@ static int get_picture_16b(VmafPicture *pic, int pic_index)
     return 0;
 }
 
+static char *test_apsnr_chroma()
+{
+    const struct {
+        enum VmafPixelFormat format;
+        bool enable_chroma, expect_chroma;
+    } cases[] = {
+        { VMAF_PIX_FMT_YUV420P, true, true },
+        { VMAF_PIX_FMT_YUV420P, false, false },
+        { VMAF_PIX_FMT_YUV400P, true, false },
+    };
+    const char *names[] = { "apsnr_y", "apsnr_cb", "apsnr_cr" };
+
+    for (unsigned bpc = 8; bpc <= 16; bpc += 8) {
+        for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            PsnrState s = {
+                .enable_chroma = cases[i].enable_chroma,
+                .enable_apsnr = true,
+            };
+            VmafFeatureExtractor fex = { .priv = &s };
+            int err = init(&fex, cases[i].format, bpc, 4, 4);
+            mu_assert("PSNR initialization failed", !err);
+
+            VmafPicture ref, dist;
+            err = vmaf_picture_alloc(&ref, cases[i].format, bpc, 4, 4);
+            mu_assert("reference allocation failed", !err);
+            err = vmaf_picture_alloc(&dist, cases[i].format, bpc, 4, 4);
+            mu_assert("distorted allocation failed", !err);
+            for (unsigned p = 0; p < 3; p++) {
+                if (!ref.data[p]) continue;
+                memset(ref.data[p], 0, ref.stride[p] * ref.h[p]);
+                memset(dist.data[p], 255, dist.stride[p] * dist.h[p]);
+            }
+
+            VmafFeatureCollector *fc;
+            err = vmaf_feature_collector_init(&fc);
+            mu_assert("collector initialization failed", !err);
+            err = extract(&fex, &ref, NULL, &dist, NULL, 0, fc);
+            mu_assert("PSNR extraction failed", !err);
+            mu_assert("APSNR flush failed", flush(&fex, fc) == 1);
+
+            for (unsigned p = 0; p < 3; p++) {
+                double score;
+                err = vmaf_feature_collector_get_aggregate(fc, names[p], &score);
+                if (p && !cases[i].expect_chroma) {
+                    mu_assert("unexpected chroma APSNR", err < 0);
+                } else {
+                    mu_assert("missing APSNR", !err);
+                    mu_assert("maximum pixel error must give zero APSNR",
+                              almost_equal(score, 0.0));
+                }
+            }
+            vmaf_feature_collector_destroy(fc);
+            vmaf_picture_unref(&ref);
+            vmaf_picture_unref(&dist);
+        }
+    }
+    return NULL;
+}
+
 static char *test_16b_large_diff()
 {
     VmafPicture pic1, pic2;
@@ -95,6 +154,7 @@ static char *test_16b_large_diff()
 
 char *run_tests()
 {
+    mu_run_test(test_apsnr_chroma);
     mu_run_test(test_16b_large_diff);
 
     return NULL;
