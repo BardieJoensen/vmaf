@@ -33,6 +33,7 @@
 #include "picture.h"
 #include "picture_copy.h"
 #include "vif_tools.h"
+#include "speed.h"
 
 #include "cpu.h"
 #if ARCH_X86
@@ -79,6 +80,13 @@ typedef struct SpeedBuffers {
     float *cov_mat;
     float *eigenvalues;
     float *tmp_buffer;
+    // Bilinear column table for the (fixed, resolution-derived) prescale of
+    // this feature extractor instance. Populated once in speed_init() and
+    // reused for every frame instead of being recomputed per call. NULL
+    // when the configured scaling method isn't bilinear.
+    int *bilinear_x1a;
+    int *bilinear_x2a;
+    float *bilinear_dxa;
 } SpeedBuffers;
 
 // Everything that is passed in as a feature option and is needed for
@@ -677,10 +685,10 @@ static float compute_mean(SpeedDimensions dim, const float *data,
 
 // Scalar reference implementation of the covariance-sum kernel.
 // Returns the un-normalized sum; the /N division happens in compute_covariance.
-static double compute_cov_kernel_scalar(const float *data_x, const float *data_y,
-                                        size_t stride_px, size_t height,
-                                        size_t width, double mean_x,
-                                        double mean_y)
+double compute_cov_kernel_scalar(const float *data_x, const float *data_y,
+                                 size_t stride_px, size_t height,
+                                 size_t width, double mean_x,
+                                 double mean_y)
 {
     double result = 0;
     for (size_t i = 0; i < height; i++) {
@@ -938,12 +946,13 @@ static void subtract_image(float *im1, float *im2, int w, int h, size_t stride) 
 // Filters the image with a Gaussian filter and then performs local
 // mean subtraction
 static void filter_and_downscale(SpeedDimensions dim, SpeedOptions *opt,
-                                 float *frame_buffer, float *tmp_buffer,
+                                 float *frame_buffer, SpeedBuffers *bufs,
                                  size_t float_stride)
 {
     size_t stride_px = float_stride / sizeof(float);
 
     size_t frame_size = stride_px * dim.alloc_height;
+    float *tmp_buffer = bufs->tmp_buffer;
     float *curr_scale = tmp_buffer; tmp_buffer += frame_size;
     float *tmpbuf = tmp_buffer; tmp_buffer += frame_size;
 
@@ -954,9 +963,19 @@ static void filter_and_downscale(SpeedDimensions dim, SpeedOptions *opt,
     if (!ALMOST_EQUAL(opt->speed_prescale, 1.0)) {
         memcpy(tmpbuf, frame_buffer,
                stride_px * dim.alloc_height * sizeof(float));
-        vif_scale_frame_s(scaling_method, tmpbuf, frame_buffer,
-                          dim.original_width, dim.original_height, stride_px,
-                          dim.scaled_width, dim.scaled_height, stride_px);
+        if (scaling_method == vif_scale_bilinear && bufs->bilinear_x1a) {
+            // Column table was precomputed once in speed_init() for this
+            // instance's fixed src_w/dst_w, instead of being recomputed on
+            // every call as vif_scale_frame_s(vif_scale_bilinear, ...) does.
+            vif_scale_frame_bilinear_precomputed_s(tmpbuf, frame_buffer,
+                              dim.original_width, dim.original_height, stride_px,
+                              dim.scaled_width, dim.scaled_height, stride_px,
+                              bufs->bilinear_x1a, bufs->bilinear_x2a, bufs->bilinear_dxa);
+        } else {
+            vif_scale_frame_s(scaling_method, tmpbuf, frame_buffer,
+                              dim.original_width, dim.original_height, stride_px,
+                              dim.scaled_width, dim.scaled_height, stride_px);
+        }
     }
 
     // The kernelscale has been checked for validity in the init callback
@@ -986,11 +1005,11 @@ static void filter_and_downscale(SpeedDimensions dim, SpeedOptions *opt,
 int speed_extract_score(SpeedState *s, SpeedOptions *opt, float *ref,
                         float *dis, float *score)
 {
-    filter_and_downscale(s->dimensions, opt, ref, s->buffers.tmp_buffer,
+    filter_and_downscale(s->dimensions, opt, ref, &s->buffers,
                          s->float_stride);
     int err_ref = est_params(s, ref, opt->speed_sigma_nn, &(s->ref_results));
 
-    filter_and_downscale(s->dimensions, opt, dis, s->buffers.tmp_buffer,
+    filter_and_downscale(s->dimensions, opt, dis, &s->buffers,
                          s->float_stride);
 
     int err_dis = est_params(s, dis, opt->speed_sigma_nn, &(s->dis_results));
@@ -1084,6 +1103,31 @@ int speed_init(SpeedState *s, SpeedOptions *opt, int w, int h)
     if (!s->buffers.tmp_buffer)
         return -ENOMEM;
 
+    s->buffers.bilinear_x1a = NULL;
+    s->buffers.bilinear_x2a = NULL;
+    s->buffers.bilinear_dxa = NULL;
+    if (scaling_method == vif_scale_bilinear &&
+        !ALMOST_EQUAL(opt->speed_prescale, 1.0)) {
+        // The column table only depends on original_width/scaled_width, both
+        // fixed for the lifetime of this instance, so it's computed once here
+        // instead of on every filter_and_downscale() call.
+        s->buffers.bilinear_x1a =
+            aligned_malloc(sizeof(int) * dim->scaled_width, 32);
+        if (!s->buffers.bilinear_x1a)
+            return -ENOMEM;
+        s->buffers.bilinear_x2a =
+            aligned_malloc(sizeof(int) * dim->scaled_width, 32);
+        if (!s->buffers.bilinear_x2a)
+            return -ENOMEM;
+        s->buffers.bilinear_dxa =
+            aligned_malloc(sizeof(float) * dim->scaled_width, 32);
+        if (!s->buffers.bilinear_dxa)
+            return -ENOMEM;
+        vif_scale_frame_bilinear_precompute_columns_s(dim->original_width,
+                          dim->scaled_width, s->buffers.bilinear_x1a,
+                          s->buffers.bilinear_x2a, s->buffers.bilinear_dxa);
+    }
+
     s->ref_results.entropies = aligned_malloc(sizeof(float) * dim->num_blocks, 32);
     if (!s->ref_results.entropies)
         return -ENOMEM;
@@ -1124,6 +1168,12 @@ int speed_close(SpeedState *s) {
         aligned_free(s->buffers.eigenvalues);
     if (s->buffers.tmp_buffer)
         aligned_free(s->buffers.tmp_buffer);
+    if (s->buffers.bilinear_x1a)
+        aligned_free(s->buffers.bilinear_x1a);
+    if (s->buffers.bilinear_x2a)
+        aligned_free(s->buffers.bilinear_x2a);
+    if (s->buffers.bilinear_dxa)
+        aligned_free(s->buffers.bilinear_dxa);
 
     if (s->ref_results.entropies)
         aligned_free(s->ref_results.entropies);
