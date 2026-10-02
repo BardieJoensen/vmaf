@@ -160,62 +160,72 @@ __device__ float ciede2000(LABColorf color_1, LABColorf color_2)
                  hue * hue + r_sub_t * chroma * hue);
 }
 
-__device__ __forceinline__ float rgb_to_xyz_map(float c)
+__device__ double pow_2_4(double x)
 {
-    if (c > 10.f / 255.f) {
-        const float A = 0.055f;
-        const float D = 1.0f / 1.055f;
-        return powf((c + A) * D, 2.4f);
+    return pow(x, 2.4);
+}
+
+__device__ double rgb_to_xyz_map(double c)
+{
+    if (c > 10. / 255.) {
+        const double A = 0.055;
+        const double D = 1.0 / 1.055;
+        return pow_2_4((c + A) * D);
     } else {
-        const float D = 1.0f / 12.92f;
+        const double D = 1.0 / 12.92;
         return (c * D);
     }
 }
 
-__device__ __forceinline__ float xyz_to_lab_map(float c)
+__device__ double cbrt_approx(double c)
 {
-    const float KAPPA = 24389.0f / 27.0f;
-    const float EPSILON = 216.0f / 24389.0f;
+    return pow(c, 1.0 / 3.0);
+}
+
+__device__ float xyz_to_lab_map(double c)
+{
+    const double KAPPA = 24389.0 / 27.0;
+    const double EPSILON = 216.0 / 24389.0;
 
     if (c > EPSILON) {
-        return powf(c, 1.0f / 3.0f);
+        return cbrt_approx(c);
     } else {
-        return (KAPPA * c + 16.0f) * (1.0f / 116.0f);
+        return (KAPPA * c + 16.0) * (1.0 / 116.0);
     }
 }
 
-__device__ LABColorf get_lab_color(float y, float u, float v, unsigned bpc)
+__device__ LABColorf get_lab_color(double y, double u, double v, unsigned bpc)
 {
-    const float scale = 1 << (bpc - 8);
+    const double scale = 1 << (bpc - 8);
 
-    y = (y - 16.f  * scale) * (1.f / (219.f * scale));
-    u = (u - 128.f * scale) * (1.f / (224.f * scale));
-    v = (v - 128.f * scale) * (1.f / (224.f * scale));
+    y = (y - 16.  * scale) * (1. / (219. * scale));
+    u = (u - 128. * scale) * (1. / (224. * scale));
+    v = (v - 128. * scale) * (1. / (224. * scale));
 
     // Assumes BT.709
-    float r = y + 1.28033f * v;
-    float g = y - 0.21482f * u - 0.38059f * v;
-    float b = y + 2.12798f * u;
+    double r = y + 1.28033 * v;
+    double g = y - 0.21482 * u - 0.38059 * v;
+    double b = y + 2.12798 * u;
 
     r = rgb_to_xyz_map(r);
     g = rgb_to_xyz_map(g);
     b = rgb_to_xyz_map(b);
 
-    float x = r * 0.4124564390896921f + g * 0.357576077643909f +
-              b * 0.18043748326639894f;
-          y = r * 0.21267285140562248f + g * 0.715152155287818f +
-              b * 0.07217499330655958f;
-    float z = r * 0.019333895582329317f + g * 0.119192025881303f +
-              b * 0.9503040785363677f;
+    double x = r * 0.4124564390896921 + g * 0.357576077643909 +
+              b * 0.18043748326639894;
+          y = r * 0.21267285140562248 + g * 0.715152155287818 +
+              b * 0.07217499330655958;
+    double z = r * 0.019333895582329317 + g * 0.119192025881303 +
+              b * 0.9503040785363677;
 
-    x = xyz_to_lab_map(x * (1.0f / 0.95047f));
+    x = xyz_to_lab_map(x * (1.0 / 0.95047));
     y = xyz_to_lab_map(y);
-    z = xyz_to_lab_map(z * (1.0f / 1.08883f));
+    z = xyz_to_lab_map(z * (1.0 / 1.08883));
 
     LABColorf lab_color = {
-        (116.0f * y) - 16.0f,
-        500.0f * (x - y),
-        200.0f * (y - z),
+        (116.0 * y) - 16.0,
+        500.0 * (x - y),
+        200.0 * (y - z),
     };
 
     return lab_color;
