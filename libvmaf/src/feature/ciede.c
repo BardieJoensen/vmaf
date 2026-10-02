@@ -180,9 +180,10 @@ static float get_r_sub_t(const float c_bar_prime,
 {
     const float degrees =
         (radians_to_degrees(upcase_h_bar_prime) - 275.0) * (1.0 / 25.0);
+    const float c_bar_prime7 = powf(c_bar_prime, 7);
 
     return -2.0 *
-          sqrt(powf(c_bar_prime, 7) / (powf(c_bar_prime, 7) + powf(25., 7))) *
+          sqrt(c_bar_prime7 / (c_bar_prime7 + powf(25., 7))) *
           sin(degrees_to_radians(60.0 * exp(-(powf(degrees, 2)))));
 }
 
@@ -205,12 +206,12 @@ static float ciede2000(LABColor color_1, LABColor color_2, KSubArgs ksub)
     const float c1 = sqrt(pow(color_1.a, 2) + pow(color_1.b, 2));
     const float c2 = sqrt(pow(color_2.a, 2) + pow(color_2.b, 2));
     const float c_bar = (c1 + c2) / 2;
+    const double c_bar7 = pow(c_bar, 7);
+    const double chroma_shift = 1 - sqrt(c_bar7 / (c_bar7 + pow(25, 7)));
     const float a_prime_1 =
-        color_1.a + (color_1.a / 2) *
-        (1 - sqrt(pow(c_bar, 7) / (pow(c_bar, 7) + pow(25, 7))));
+        color_1.a + (color_1.a / 2) * chroma_shift;
     const float a_prime_2 =
-         color_2.a + (color_2.a / 2) *
-         (1 - sqrt(pow(c_bar, 7) / (pow(c_bar, 7) + pow(25, 7))));
+        color_2.a + (color_2.a / 2) * chroma_shift;
     const float c_prime_1 = sqrt(pow(a_prime_1, 2) + pow(color_1.b, 2));
     const float c_prime_2 = sqrt(pow(a_prime_2, 2) + pow(color_2.b, 2));
     const float c_bar_prime = (c_prime_1 + c_prime_2) / 2;
